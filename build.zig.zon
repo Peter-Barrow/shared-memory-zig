@@ -1,0 +1,19 @@
+.{
+    .name = "shared-memory-zig",
+    .version = "0.0.0",
+
+    .dependencies = .{
+        .zigwin32 = .{
+            .url = "https://github.com/marlersoft/zigwin32/archive/refs/heads/main.zip",
+            .hash = "12205354832d93fb0b7f5f3a55965afd52f9c631e5f57d26f35f0ef18c8ceafa9260",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
