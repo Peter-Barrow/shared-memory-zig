@@ -28,7 +28,7 @@ const use_shm_funcs = switch (tag) {
 
 const ShmHeader = struct {
     size_bytes: usize,
-    size_elements: usize,
+    total_elements: usize,
 };
 
 pub fn SharedMemory(comptime T: type) type {
@@ -89,7 +89,7 @@ pub fn SharedMemory(comptime T: type) type {
             var header: *ShmHeader = @ptrCast(@alignCast(result.data.ptr[0..header_size]));
 
             header.size_bytes = size;
-            header.size_elements = count;
+            header.total_elements = count;
 
             const data: []T = @as([*]T, @ptrCast(@alignCast(&result.data.ptr[header_size])))[0..count];
             return .{
@@ -139,7 +139,7 @@ pub fn SharedMemory(comptime T: type) type {
             const header_size = @sizeOf(ShmHeader);
             const header: *ShmHeader = @ptrCast(@alignCast(result.data.ptr[0..header_size]));
 
-            const count = header.size_elements;
+            const count = header.total_elements;
 
             const data: []T = @as([*]T, @ptrCast(@alignCast(&result.data.ptr[header_size])))[0..count];
 
@@ -861,7 +861,9 @@ test "SharedMemory - Array" {
 
     // posixForceClose(shm_name);
 
-    var shm = try SharedMemory(i32).create(shm_name, array_size);
+    const SharedI32 = SharedMemory(i32);
+
+    var shm = try SharedI32.create(shm_name, array_size);
     defer shm.close();
 
     for (shm.data, 0..) |*item, i| {
@@ -880,13 +882,13 @@ test "SharedMemory - Array" {
     var shm2 = switch (tag) {
         .linux, .freebsd => blk: {
             if (use_shm_funcs) {
-                break :blk try SharedMemory(i32).open(shm_name);
+                break :blk try SharedI32.open(shm_name);
             } else {
-                break :blk try SharedMemory(i32).open(path);
+                break :blk try SharedI32.open(path);
             }
         },
-        .windows => try SharedMemory(i32).open(shm_name),
-        else => try SharedMemory(i32).open(shm_name),
+        .windows => try SharedI32.open(shm_name),
+        else => try SharedI32.open(shm_name),
     };
     defer shm2.close();
 
@@ -903,13 +905,15 @@ test "SharedMemory - Structure with String" {
         string: [20]u8,
     };
 
+    const SharedTestStruct = SharedMemory(TestStruct);
+
     const shm_name = "/test_struct_with_string";
 
     //posixForceClose(shm_name);
 
     const count = 1;
 
-    var shm = try SharedMemory(TestStruct).create(shm_name, count);
+    var shm = try SharedTestStruct.create(shm_name, count);
     defer shm.close();
 
     shm.data[0].id = 42;
@@ -928,13 +932,13 @@ test "SharedMemory - Structure with String" {
     var shm2 = switch (tag) {
         .linux, .freebsd => blk: {
             if (use_shm_funcs) {
-                break :blk try SharedMemory(TestStruct).open(shm_name);
+                break :blk try SharedTestStruct.open(shm_name);
             } else {
-                break :blk try SharedMemory(TestStruct).open(path);
+                break :blk try SharedTestStruct.open(path);
             }
         },
-        .windows => try SharedMemory(TestStruct).open(shm_name),
-        else => try SharedMemory(TestStruct).open(shm_name),
+        .windows => try SharedTestStruct.open(shm_name),
+        else => try SharedTestStruct.open(shm_name),
     };
     defer shm2.close();
 
