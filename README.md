@@ -55,14 +55,6 @@ shm.data[0].float = 3.14;
 _ = std.fmt.bufPrint(&shm.data[0].string, "Hello, SHM!", .{}) catch unreachable;
 
 // Open the shared memory in another "process"
-var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
-const pid = switch (tag) {
-    .linux => std.os.linux.getpid(),
-    .windows => 0,
-    else => std.c.getpid(),
-};
-const path = try std.fmt.bufPrint(&buffer, "/proc/{d}/fd/{d}", .{ pid, shm.handle });
-
 var shm2 = try shmem.SharedMemory(TestStruct).open(shm_name);
 defer shm2.close();
 
