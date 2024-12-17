@@ -7,6 +7,10 @@
             .url = "https://github.com/marlersoft/zigwin32/archive/refs/heads/main.zip",
             .hash = "12205354832d93fb0b7f5f3a55965afd52f9c631e5f57d26f35f0ef18c8ceafa9260",
         },
+        .@"known-folders" = .{
+            .url = "git+https://github.com/ziglibs/known-folders.git#1cceeb70e77dec941a4178160ff6c8d05a74de6f",
+            .hash = "12205f5e7505c96573f6fc5144592ec38942fb0a326d692f9cddc0c7dd38f9028f29",
+        },
     },
 
     .paths = .{

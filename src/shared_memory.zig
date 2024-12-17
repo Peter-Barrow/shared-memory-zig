@@ -10,6 +10,8 @@ const winSysInfo = if (tag == .windows) @import("zigwin32").system.system_inform
 const winMem = if (tag == .windows) @import("zigwin32").system.memory;
 const winSec = if (tag == .windows) @import("zigwin32").security;
 
+const knownFolders = @import("known-folders");
+
 const pid_t = switch (tag) {
     .windows => u32,
     else => i32,
@@ -41,7 +43,8 @@ pub fn SharedMemory(comptime T: type) type {
         // ptr: ?[]align(4096) u8,
         ptr: ?[]u8,
         data: []T,
-        // TODO: write a header to the shared memory, in this way "data" will always be a pointer
+        allocator: ?std.mem.Allocator,
+
         // to a struct
 
         /// Creates a new shared memory segment with the given name and size.
@@ -52,6 +55,7 @@ pub fn SharedMemory(comptime T: type) type {
         /// Args:
         ///     name: The name of the shared memory segment. This should be unique across the system.
         ///     count: The number of elements of type T to allocate in the shared memory.
+        ///     allocator: Optional allocator, this is a requirement for using memfd
         ///
         /// Returns:
         ///     A new Self instance representing the created shared memory. This includes:
@@ -66,7 +70,7 @@ pub fn SharedMemory(comptime T: type) type {
         ///     - Out of memory
         ///     - Name conflicts
         ///     - System-specific limitations
-        pub fn create(name: []const u8, count: usize) !Self {
+        pub fn create(name: []const u8, count: usize, allocator: ?std.mem.Allocator) !Self {
             //const size = count * @sizeOf(T);
             const size = @sizeOf(ShmHeader) + (count * @sizeOf(T));
             const result: Shared = switch (tag) {
@@ -74,7 +78,11 @@ pub fn SharedMemory(comptime T: type) type {
                     if (use_shm_funcs) {
                         break :blk try posixCreate(name, size);
                     }
-                    break :blk try memfdBasedCreate(name, size);
+                    assert(allocator != null);
+                    if (allocator) |alloca| {
+                        break :blk try memfdBasedCreate(alloca, name, size);
+                    }
+                    return error.NoAllocatorForMemfdMeta;
                 },
                 .windows => try windowsCreate(name, size),
                 else => try posixCreate(name, size),
@@ -98,6 +106,7 @@ pub fn SharedMemory(comptime T: type) type {
                 .size = count,
                 .ptr = result.data,
                 .data = data,
+                .allocator = allocator,
             };
         }
 
@@ -108,6 +117,7 @@ pub fn SharedMemory(comptime T: type) type {
         ///
         /// Args:
         ///     name: The name of the shared memory segment to open. This should match the name used in create().
+        ///     allocator: Optional allocator, this is a requirement for using memfd
         ///
         /// Returns:
         ///     A Self instance representing the opened shared memory. This includes:
@@ -121,13 +131,18 @@ pub fn SharedMemory(comptime T: type) type {
         ///     - The shared memory segment does not exist
         ///     - Insufficient permissions
         ///     - System-specific errors in opening or mapping the shared memory
-        pub fn open(name: []const u8) !Self {
+        pub fn open(name: []const u8, allocator: ?std.mem.Allocator) !Self {
             const result = switch (tag) {
                 .linux, .freebsd => blk: {
                     if (use_shm_funcs) {
                         break :blk try posixOpen(name);
                     }
-                    break :blk try memfdBasedOpen(name);
+                    assert(allocator != null);
+                    // break :blk if (allocator) |alloca| try memfdBasedOpen(alloca, name);
+                    if (allocator) |alloca| {
+                        break :blk try memfdBasedOpen(alloca, name);
+                    }
+                    return error.NoAllocatorForMemfdMeta;
                 },
                 .windows => try windowsOpen(name),
                 else => try posixOpen(name),
@@ -149,6 +164,7 @@ pub fn SharedMemory(comptime T: type) type {
                 .size = count,
                 .ptr = result.data,
                 .data = data,
+                .allocator = allocator,
             };
         }
 
@@ -161,14 +177,18 @@ pub fn SharedMemory(comptime T: type) type {
         ///     path: The name or path of the shared memory segment to check. The exact format
         ///           may depend on the operating system and the method used to create the segment.
         ///
+        ///     allocator: Optional allocator, this is a requirement for using memfd
         /// Returns:
         ///     true if the shared memory segment exists and is accessible, false otherwise.
         ///
         /// Note: This function does not throw errors. A false return could mean either that the
         /// segment doesn't exist or that there was an error checking for its existence.
-        pub fn exists(path: []const u8) bool {
+        pub fn exists(path: []const u8, allocator: ?std.mem.Allocator) bool {
             return switch (tag) {
-                .linux, .freebsd => memfdBasedExists(path),
+                .linux, .freebsd => {
+                    assert(allocator != null);
+                    return if (allocator) |alloca| memfdBasedExists(alloca, path) else false;
+                },
                 .windows => windowsMapExists(path),
                 else => posixMapExists(path),
             };
@@ -188,7 +208,13 @@ pub fn SharedMemory(comptime T: type) type {
         /// The shared memory segment may still exist in the system if other processes are using it.
         pub fn close(self: *Self) void {
             switch (tag) {
-                .linux, .freebsd => memfdBasedClose(self.ptr, self.handle, self.name),
+                .linux, .freebsd => {
+                    assert(self.allocator != null);
+                    // if (self.allocator) |alloca| memfdBasedClose(alloca, self.ptr, self.handle, self.name);
+                    if (self.allocator) |alloca| {
+                        memfdBasedClose(alloca, self.ptr, self.handle, self.name);
+                    }
+                },
                 .windows => windowsClose(self.ptr, self.handle, self.name),
                 else => posixClose(self.ptr, self.handle, self.name),
             }
@@ -203,6 +229,79 @@ const Shared = struct {
     fd: std.fs.File.Handle,
     pid: ?pid_t = null,
 };
+
+fn fileNameStartsWithSlash(name: []const u8) bool {
+    return std.mem.count(u8, name, "/") == 0;
+}
+
+/// Returns the XDG runtime path for a memfd metadata file with the given name
+/// Caller owns returned memory
+fn xgdRunTimePath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const runtime_dir = blk: {
+        const dir = try knownFolders.getPath(allocator, .runtime);
+        if (dir) |d| {
+            break :blk d;
+        }
+        return error.NoRuntimePathAvailable;
+    };
+    defer allocator.free(runtime_dir);
+
+    return std.fmt.allocPrint(allocator, "{s}/.memfd_{s}.meta", .{ runtime_dir, name });
+}
+
+/// Metadata about a memfd file that is stored on disk
+const XdgMemfdMeta = struct {
+    pid: pid_t,
+    fd: std.fs.File.Handle,
+    size: usize,
+    timestamp: i64,
+};
+
+/// Writes metadata about a memfd file to disk
+/// The metadata is stored in the XDG runtime directory
+fn writeMemfdMeta(allocator: std.mem.Allocator, name: []const u8, meta: XdgMemfdMeta) !void {
+    const meta_path = try xgdRunTimePath(allocator, name);
+    defer allocator.free(meta_path);
+
+    const file = try std.fs.createFileAbsolute(meta_path, .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    try file.writeAll(std.mem.asBytes(&meta));
+}
+
+/// Reads metadata about a memfd file from disk
+/// If the process that created the memfd no longer exists, the metadata file is deleted
+/// Returns error.IncorrectSize if the metadata file is corrupted
+fn readMemfdMeta(allocator: std.mem.Allocator, name: []const u8) !XdgMemfdMeta {
+    const meta_path = try xgdRunTimePath(allocator, name);
+    defer allocator.free(meta_path);
+
+    const file = try std.fs.openFileAbsolute(meta_path, .{});
+    defer file.close();
+
+    var meta: XdgMemfdMeta = undefined;
+    const bytes_read = try file.readAll(std.mem.asBytes(&meta));
+    if (bytes_read != @sizeOf(XdgMemfdMeta)) return error.IncorrectSize;
+
+    // If process no longer exists, clean up file
+    std.posix.kill(meta.pid, 0) catch {
+        // we know the process no longer exists so delete the meta file
+        try std.fs.deleteFileAbsolute(meta_path);
+    };
+
+    return meta;
+}
+
+/// Deletes the metadata file for a memfd if it exists
+/// Does nothing if the file doesn't exist or can't be deleted
+fn deleteMemfdMeta(allocator: std.mem.Allocator, name: []const u8) void {
+    const meta_path = xgdRunTimePath(allocator, name) catch return;
+    defer allocator.free(meta_path);
+    std.fs.deleteFileAbsolute(meta_path) catch return;
+}
 
 /// Creates a shared memory segment using memfd on Linux and FreeBSD.
 ///
@@ -226,8 +325,10 @@ const Shared = struct {
 ///     - memfd_create failure
 ///     - ftruncate failure
 ///     - mmap failure
-fn memfdBasedCreate(name: []const u8, size: usize) !Shared {
-    const fd = try std.posix.memfd_create(name, 0);
+fn memfdBasedCreate(allocator: std.mem.Allocator, name: []const u8, size: usize) !Shared {
+    const n = if (fileNameStartsWithSlash(name)) name else name[1..name.len];
+    // std.debug.print("name (n):\t{s}\n", .{n});
+    const fd = try std.posix.memfd_create(n, 0);
 
     try std.posix.ftruncate(fd, size);
 
@@ -245,10 +346,21 @@ fn memfdBasedCreate(name: []const u8, size: usize) !Shared {
         else => std.c.getpid(),
     };
 
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
-    const path = std.fmt.bufPrintZ(&buffer, "/proc/{d}/fd/{d}", .{ pid, fd }) catch unreachable;
+    // var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
+    // const path = std.fmt.bufPrintZ(&buffer, "/proc/{d}/fd/{d}", .{ pid, fd }) catch unreachable;
+    // assert(memfdBasedExists(allocator, path) == true);
 
-    assert(memfdBasedExists(path) == true);
+    try writeMemfdMeta(
+        allocator,
+        n,
+        .{
+            .pid = pid,
+            .fd = fd,
+            .size = size,
+            .timestamp = std.time.timestamp(),
+        },
+    );
+
     return .{
         .data = ptr,
         .size = size,
@@ -278,10 +390,17 @@ fn memfdBasedCreate(name: []const u8, size: usize) !Shared {
 ///     - File open failure
 ///     - fstat failure
 ///     - mmap failure
-fn memfdBasedOpen(name: []const u8) !Shared {
-    assert(memfdBasedExists(name) == true);
+fn memfdBasedOpen(allocator: std.mem.Allocator, name: []const u8) !Shared {
 
-    const handle = try std.fs.openFileAbsolute(name, .{});
+    // const meta = try readMemfdMeta(allocator, name) catch return error.SharedMemoryNotFound;
+    const n = if (fileNameStartsWithSlash(name)) name else name[1..name.len];
+    const meta = try readMemfdMeta(allocator, n);
+    var buffer = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+    const path = try std.fmt.bufPrint(&buffer, "/proc/{d}/fd/{d}", .{ meta.pid, meta.fd });
+    // assert(memfdBasedExists(allocator, path) == true);
+    // std.debug.print("name to test existence:\t{s}\n", .{path});
+
+    const handle = try std.fs.openFileAbsolute(path, .{});
     const fd = handle.handle;
     const stat = try std.posix.fstat(fd);
     const flags_protection: u32 = std.posix.PROT.READ;
@@ -317,9 +436,12 @@ fn memfdBasedOpen(name: []const u8) !Shared {
 ///
 /// Note: This function does not throw errors. A false return could mean either that the
 /// segment doesn't exist or that there was an error checking for its existence.
-fn memfdBasedExists(name: []const u8) bool {
-    const handle = std.fs.openFileAbsolute(name, .{}) catch return false;
+fn memfdBasedExists(allocator: std.mem.Allocator, name: []const u8) bool {
+    // std.debug.print("name to test existence:\t{s}\n", .{name});
+    const n = if (fileNameStartsWithSlash(name)) name[1..] else name;
+    const handle = std.fs.openFileAbsolute(n, .{}) catch return false;
     handle.close();
+    _ = readMemfdMeta(allocator, name) catch return false;
     return true;
 }
 
@@ -336,11 +458,17 @@ fn memfdBasedExists(name: []const u8) bool {
 ///
 /// Note: This function does not remove the memfd from the system. The memfd will be automatically
 /// cleaned up when all references to it are closed.
-fn memfdBasedClose(ptr: ?[]u8, fd: std.fs.File.Handle, name: []const u8) void {
-    _ = name;
+fn memfdBasedClose(
+    allocator: std.mem.Allocator,
+    ptr: ?[]u8,
+    fd: std.fs.File.Handle,
+    name: []const u8,
+) void {
     // assert(existsMemfdBased(name) == true);
     if (ptr) |p| std.posix.munmap(@alignCast(p));
     std.posix.close(fd);
+    const n = if (fileNameStartsWithSlash(name)) name[1..] else name;
+    deleteMemfdMeta(allocator, n);
 
     // assert(memfdBasedExists(name) == false);
 }
@@ -808,42 +936,31 @@ pub fn pathFromMemFdFile(buffer: []const u8, file_handle: std.fs.File, pid: ?u32
 }
 
 test "SharedMemory - Single Struct" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloca = switch (tag) {
+        .linux, .freebsd => gpa.allocator(),
+        else => null,
+    };
+
     const TestStruct = struct {
         x: i32,
         y: f64,
     };
     const SharedStruct = SharedMemory(TestStruct);
 
-    const shm_name = "test_single_struct";
+    const shm_name = "/test_single_struct";
     const count = 1;
 
     //posixForceClose(shm_name);
 
-    var shm: SharedStruct = try SharedStruct.create(shm_name, count);
+    var shm: SharedStruct = try SharedStruct.create(shm_name, count, alloca);
     defer shm.close();
 
     shm.data[0] = .{ .x = 42, .y = 3.14 };
 
     // Open the shared memory in another "process"
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
-    const pid = switch (tag) {
-        .linux => std.os.linux.getpid(),
-        .windows => 0,
-        else => std.c.getpid(),
-    };
-    const path = try std.fmt.bufPrint(&buffer, "/proc/{d}/fd/{d}", .{ pid, shm.handle });
-
-    var shm2 = switch (tag) {
-        .linux, .freebsd => blk: {
-            if (use_shm_funcs) {
-                break :blk try SharedStruct.open(shm_name);
-            } else {
-                break :blk try SharedStruct.open(path);
-            }
-        },
-        .windows => try SharedStruct.open(shm_name),
-        else => try SharedStruct.open(shm_name),
-    };
+    var shm2 = try SharedStruct.open(shm_name, alloca);
     defer shm2.close();
 
     try std.testing.expectEqual(@as(i32, 42), shm2.data[0].x);
@@ -851,6 +968,13 @@ test "SharedMemory - Single Struct" {
 }
 
 test "SharedMemory - Array" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloca = switch (tag) {
+        .linux, .freebsd => gpa.allocator(),
+        else => null,
+    };
+
     const array_size = 20;
     var expected = [_]i32{0} ** array_size;
     for (0..array_size) |i| {
@@ -863,7 +987,7 @@ test "SharedMemory - Array" {
 
     const SharedI32 = SharedMemory(i32);
 
-    var shm = try SharedI32.create(shm_name, array_size);
+    var shm = try SharedI32.create(shm_name, array_size, alloca);
     defer shm.close();
 
     for (shm.data, 0..) |*item, i| {
@@ -871,25 +995,7 @@ test "SharedMemory - Array" {
     }
 
     // Open the shared memory in another "process"
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
-    const pid = switch (tag) {
-        .linux => std.os.linux.getpid(),
-        .windows => 0,
-        else => std.c.getpid(),
-    };
-    const path = try std.fmt.bufPrint(&buffer, "/proc/{d}/fd/{d}", .{ pid, shm.handle });
-
-    var shm2 = switch (tag) {
-        .linux, .freebsd => blk: {
-            if (use_shm_funcs) {
-                break :blk try SharedI32.open(shm_name);
-            } else {
-                break :blk try SharedI32.open(path);
-            }
-        },
-        .windows => try SharedI32.open(shm_name),
-        else => try SharedI32.open(shm_name),
-    };
+    var shm2 = try SharedI32.open(shm_name, alloca);
     defer shm2.close();
 
     for (shm2.data, 0..) |item, i| {
@@ -899,6 +1005,13 @@ test "SharedMemory - Array" {
 }
 
 test "SharedMemory - Structure with String" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloca = switch (tag) {
+        .linux, .freebsd => gpa.allocator(),
+        else => null,
+    };
+
     const TestStruct = struct {
         id: i32,
         float: f64,
@@ -913,7 +1026,7 @@ test "SharedMemory - Structure with String" {
 
     const count = 1;
 
-    var shm = try SharedTestStruct.create(shm_name, count);
+    var shm = try SharedTestStruct.create(shm_name, count, alloca);
     defer shm.close();
 
     shm.data[0].id = 42;
@@ -921,25 +1034,7 @@ test "SharedMemory - Structure with String" {
     _ = std.fmt.bufPrint(&shm.data[0].string, "Hello, SHM!", .{}) catch unreachable;
 
     // Open the shared memory in another "process"
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
-    const pid = switch (tag) {
-        .linux => std.os.linux.getpid(),
-        .windows => 0,
-        else => std.c.getpid(),
-    };
-    const path = try std.fmt.bufPrint(&buffer, "/proc/{d}/fd/{d}", .{ pid, shm.handle });
-
-    var shm2 = switch (tag) {
-        .linux, .freebsd => blk: {
-            if (use_shm_funcs) {
-                break :blk try SharedTestStruct.open(shm_name);
-            } else {
-                break :blk try SharedTestStruct.open(path);
-            }
-        },
-        .windows => try SharedTestStruct.open(shm_name),
-        else => try SharedTestStruct.open(shm_name),
-    };
+    var shm2 = try SharedTestStruct.open(shm_name, alloca);
     defer shm2.close();
 
     try std.testing.expectEqual(@as(i32, 42), shm2.data[0].id);

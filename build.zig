@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const zigwin32 = b.dependency("zigwin32", .{}).module("zigwin32");
+    const known_folders = b.dependency("known-folders", .{}).module("known-folders");
 
     const lib_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/root.zig"),
@@ -34,6 +35,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "use_shm_funcs", use_shm_funcs);
     lib_unit_tests.root_module.addOptions("config", options);
     lib_unit_tests.root_module.addImport("zigwin32", zigwin32);
+    lib_unit_tests.root_module.addImport("known-folders", known_folders);
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
@@ -42,4 +44,17 @@ pub fn build(b: *std.Build) void {
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
+
+    const unit_test_check = b.addTest(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    unit_test_check.root_module.addOptions("config", options);
+    unit_test_check.root_module.addImport("zigwin32", zigwin32);
+    lib_unit_tests.root_module.addImport("known-folders", known_folders);
+
+    const check = b.step("check", "Check if tests compiles");
+    check.dependOn(&unit_test_check.step);
 }
