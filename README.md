@@ -63,17 +63,7 @@ const pid = switch (tag) {
 };
 const path = try std.fmt.bufPrint(&buffer, "/proc/{d}/fd/{d}", .{ pid, shm.handle });
 
-var shm2 = switch (tag) {
-    .linux, .freebsd => blk: {
-        if (use_shm_funcs) {
-            break :blk try shmem.SharedMemory(TestStruct).open(shm_name);
-        } else {
-            break :blk try shmem.SharedMemory(TestStruct).open(path);
-        }
-    },
-    .windows => try shmem.SharedMemory(TestStruct).open(shm_name),
-    else => try shmem.SharedMemory(TestStruct).open(shm_name),
-};
+var shm2 = try shmem.SharedMemory(TestStruct).open(shm_name);
 defer shm2.close();
 
 try std.testing.expectEqual(@as(i32, 42), shm2.data[0].id);
