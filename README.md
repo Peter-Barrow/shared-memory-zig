@@ -32,6 +32,7 @@ exe.root_module.addImport("shared-memory-zig", shared_memory);
 
 ## Dependencies
 For compatibility with Windows this requires [zigwin32](https://github.com/marlersoft/zigwin32)
+This codebase also uses the [known-folders](https://github.com/ziglibs/known-folders/tree/master) library to get the runtime directory on Linux and FreeBSD when using the `memfd` backend.
 
 ## Example
 ``` zig
