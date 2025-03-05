@@ -16,20 +16,21 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const zigwin32 = b.dependency("zigwin32", .{}).module("zigwin32");
-    const known_folders = b.dependency("known-folders", .{}).module("known-folders");
-
-    const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        // .link_libc = true,
-    });
+    const known_folders = b.dependency("known_folders", .{}).module("known-folders");
 
     const use_shm_funcs = b.option(
         bool,
         "use_shm_funcs",
         "Use shm_open and shm_unlink instead of memfd_create",
     ) orelse false;
+
+    const lib_unit_tests = b.addTest(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = use_shm_funcs,
+    });
+
 
     const options = b.addOptions();
     options.addOption(bool, "use_shm_funcs", use_shm_funcs);

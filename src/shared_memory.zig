@@ -26,8 +26,6 @@ const use_shm_funcs = switch (tag) {
     else => true, // all other platforms that support shm_open and shm_unlink
 };
 
-// TODO: using memfd across processes relies on knowing the pid of the process that made the fd, so we would need to cache this somewhere otherwise it only works via fork...
-
 const ShmHeader = struct {
     size_bytes: usize,
     total_elements: usize,
@@ -395,7 +393,7 @@ fn memfdBasedOpen(allocator: std.mem.Allocator, name: []const u8) !Shared {
     // const meta = try readMemfdMeta(allocator, name) catch return error.SharedMemoryNotFound;
     const n = if (fileNameStartsWithSlash(name)) name else name[1..name.len];
     const meta = try readMemfdMeta(allocator, n);
-    var buffer = [_]u8{0} ** std.fs.MAX_PATH_BYTES;
+    var buffer = [_]u8{0} ** std.fs.max_path_bytes;
     const path = try std.fmt.bufPrint(&buffer, "/proc/{d}/fd/{d}", .{ meta.pid, meta.fd });
     // assert(memfdBasedExists(allocator, path) == true);
     // std.debug.print("name to test existence:\t{s}\n", .{path});

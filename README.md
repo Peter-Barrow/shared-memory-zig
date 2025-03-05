@@ -3,6 +3,14 @@
 **Overview**
 This library implements a unified interface to shared memory on Linux, macOS and Windows
 
+## Features
+
+- Cross-platform support (Linux, FreeBSD, Windows)
+- Multiple implementation strategies (memfd, POSIX shm, Windows file mapping)
+- Type-safe shared memory segments
+- Automatic memory layout management with headers
+- Built-in existence checking
+
 ## Installation
 Add the following to you `build.zig.zon`, replacing the url with the latest archive, for example `https://github.com/Peter-Barrow/shared-memory-zig/archive/699c748fbb143733183760cc7e83ded098eac6d1.zip` and then replacing the hash with the latest commit hash.
 ``` zig
@@ -10,7 +18,7 @@ Add the following to you `build.zig.zon`, replacing the url with the latest arch
     .name = "my-project",
     .version = "0.0.0",
     .dependencies = .{
-        .@"shared-memory-zig" = .{
+        .shared_memory = .{
             .url = "",
             .hash = "",
         },
@@ -36,7 +44,7 @@ This codebase also uses the [known-folders](https://github.com/ziglibs/known-fol
 
 ## Example
 ``` zig
-const shmem = @import("shared-memory-zig");
+const shmem = @import("shared_memory");
 
 const TestStruct = struct {
     id: i32,
