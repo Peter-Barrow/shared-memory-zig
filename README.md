@@ -1,6 +1,7 @@
 # Shared Memory Zig
 
 **Overview**
+
 This library implements a unified interface to shared memory on Linux, macOS and Windows
 
 ## Features
@@ -32,7 +33,7 @@ zig fetch --save git+https://github.com/Peter-Barrow/shared-memory-zig.git
 
 Add the following to your `build.zig`
 ``` zig
-const shared_memory = b.dependency("shared-memory-zig", .{}).module("shared-memory-zig");
+const shared_memory = b.dependency("shared_memory", .{}).module("shared_memory");
 const exe = b.addExecutable(...);
 // This adds the shared-memory-zig module to the executable which can then be imported with `@import("shared-memory-zig")`
 exe.root_module.addImport("shared-memory-zig", shared_memory);
