@@ -57,4 +57,10 @@ pub fn build(b: *std.Build) void {
 
     const check = b.step("check", "Check if tests compiles");
     check.dependOn(&unit_test_check.step);
+
+    _ = b.addModule("shared_memory", .{
+        .root_source_file = b.path("src/shared_memory.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 }
