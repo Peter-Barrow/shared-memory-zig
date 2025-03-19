@@ -1,7 +1,7 @@
 .{ .name = .shared_memory, .version = "0.1.0", .dependencies = .{
     .zigwin32 = .{
-        .url = "https://github.com/marlersoft/zigwin32/archive/refs/heads/main.zip",
-        .hash = "12205354832d93fb0b7f5f3a55965afd52f9c631e5f57d26f35f0ef18c8ceafa9260",
+        .url = "https://github.com/marlersoft/zigwin32/archive/7b434a47c2b85f395d8e5a6dca47af6a74422521.zip",
+        .hash = "zigwin32-25.0.28-preview-AAAAALqY-wMp_N2rd4U4tD9LAxh0TbUPLKhzx6lngGQK",
     },
     .known_folders = .{
         .url = "git+https://github.com/ziglibs/known-folders.git#aa24df42183ad415d10bc0a33e6238c437fc0f59",

@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const zigwin32 = b.dependency("zigwin32", .{}).module("zigwin32");
+    const zigwin32 = b.dependency("zigwin32", .{}).module("win32");
     const known_folders = b.dependency("known_folders", .{}).module("known-folders");
 
     const use_shm_funcs = b.option(
@@ -30,7 +30,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = use_shm_funcs,
     });
-
 
     const options = b.addOptions();
     options.addOption(bool, "use_shm_funcs", use_shm_funcs);
