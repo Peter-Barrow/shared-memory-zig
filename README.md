@@ -44,6 +44,7 @@ For compatibility with Windows this requires [zigwin32](https://github.com/marle
 This codebase also uses the [known-folders](https://github.com/ziglibs/known-folders/tree/master) library to get the runtime directory on Linux and FreeBSD when using the `memfd` backend.
 
 ## Example
+### Create a shared struct
 ``` zig
 const shmem = @import("shared_memory");
 
@@ -60,16 +61,91 @@ const count = 1;
 var shm = try shmem.SharedMemory(TestStruct).create(shm_name, count);
 defer shm.close();
 
-shm.data[0].id = 42;
-shm.data[0].float = 3.14;
-_ = std.fmt.bufPrint(&shm.data[0].string, "Hello, SHM!", .{}) catch unreachable;
+shm.data.id = 42;
+shm.data.float = 3.14;
+_ = std.fmt.bufPrint(&shm.data.string, "Hello, SHM!", .{}) catch unreachable;
 
 // Open the shared memory in another "process"
 var shm2 = try shmem.SharedMemory(TestStruct).open(shm_name);
 defer shm2.close();
 
-try std.testing.expectEqual(@as(i32, 42), shm2.data[0].id);
-try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data[0].float, 0.001);
-try std.testing.expectEqualStrings("Hello, SHM!", std.mem.sliceTo(&shm2.data[0].string, 0));
+try std.testing.expectEqual(@as(i32, 42), shm2.data.id);
+try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.float, 0.001);
+try std.testing.expectEqualStrings("Hello, SHM!", std.mem.sliceTo(&shm2.data.string, 0));
 
+```
+### Create a shared array of comptime known length
+``` zig
+const shmem = @import("shared_memory");
+
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+defer _ = gpa.deinit();
+const alloca = switch (tag) {
+    .linux, .freebsd => gpa.allocator(),
+    else => null,
+};
+
+const array_size = 20;
+var expected = [_]i32{0} ** array_size;
+for (0..array_size) |i| {
+    expected[i] = @intCast(i * 2);
+}
+
+const shm_name = "/test_array";
+
+const SharedI32 = SharedMemory([array_size]i32);
+
+var shm: SharedI32 = try SharedI32.create(shm_name, alloca);
+defer shm.close();
+
+for (shm.data, 0..) |*item, i| {
+    item.* = @intCast(i * 2);
+}
+
+// Open the shared memory in another "process"
+var shm2 = try SharedI32.open(shm_name, alloca);
+defer shm2.close();
+
+for (shm2.data, 0..) |item, i| {
+    try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
+}
+try std.testing.expectEqualSlices(i32, &expected, shm2.data);
+}
+```
+### Create an array with runtime known length
+``` zig
+const shmem = @import("shared_memory");
+
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+defer _ = gpa.deinit();
+const alloca = switch (tag) {
+    .linux, .freebsd => gpa.allocator(),
+    else => null,
+};
+
+const array_size = 20;
+var expected = [_]i32{0} ** array_size;
+for (0..array_size) |i| {
+    expected[i] = @intCast(i * 2);
+}
+
+const shm_name = "/test_array";
+
+const SharedI32 = SharedMemory([]i32);
+
+var shm: SharedI32 = try SharedI32.createWithLength(shm_name, array_size, alloca);
+defer shm.close();
+
+for (shm.data, 0..) |*item, i| {
+    item.* = @intCast(i * 2);
+}
+
+// Open the shared memory in another "process"
+var shm2 = try SharedI32.open(shm_name, alloca);
+defer shm2.close();
+
+for (shm2.data, 0..) |item, i| {
+    try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
+}
+try std.testing.expectEqualSlices(i32, &expected, shm2.data);
 ```

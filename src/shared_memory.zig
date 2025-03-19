@@ -31,19 +31,97 @@ const ShmHeader = struct {
     total_elements: usize,
 };
 
-pub fn SharedMemory(comptime T: type) type {
+pub fn SharedMemory(comptime S: type) type {
     return struct {
         const Self = @This();
+        // const T = if (@typeInfo(S) == .pointer) []S else *S;
+        const T = switch (@typeInfo(S)) {
+            .pointer => |ptr| switch (ptr.size) {
+                .slice => S,
+                else => []S,
+            },
+            .array => *S,
+            else => *S,
+        };
 
         handle: std.fs.File.Handle,
         name: []const u8,
         size: usize,
-        // ptr: ?[]align(4096) u8,
         ptr: ?[]u8,
-        data: []T,
+        data: T,
         allocator: ?std.mem.Allocator,
 
-        // to a struct
+        fn extractHeader(shared: Shared) *ShmHeader {
+            const header_size = @sizeOf(ShmHeader);
+            return @ptrCast(@alignCast(shared.data.ptr[0..header_size]));
+        }
+
+        fn makeSharedMemory(name: []const u8, size: usize, allocator: ?std.mem.Allocator) !Shared {
+            return switch (tag) {
+                .linux, .freebsd => blk: {
+                    if (use_shm_funcs) {
+                        break :blk try posixCreate(name, size);
+                    }
+                    assert(allocator != null);
+                    if (allocator) |alloca| {
+                        break :blk try memfdBasedCreate(alloca, name, size);
+                    }
+                    return error.NoAllocatorForMemfdMeta;
+                },
+                .windows => try windowsCreate(name, size),
+                else => try posixCreate(name, size),
+            };
+        }
+
+        /// Creates a new shared memory segment with the given name and fixed size.
+        ///
+        /// This function creates a new shared memory segment that can be accessed by multiple processes.
+        /// It allocates space for a header (ShmHeader) and the requested number of type T.
+        ///
+        /// Args:
+        ///     name: The name of the shared memory segment. This should be unique across the system.
+        ///     allocator: Optional allocator, this is a requirement for using memfd
+        ///
+        /// Returns:
+        ///     A new Self instance representing the created shared memory. This includes:
+        ///     - handle: The file handle for the shared memory.
+        ///     - name: The name of the shared memory segment.
+        ///     - size: The number of elements allocated.
+        ///     - ptr: A pointer to the entire shared memory block.
+        ///     - data: A slice of the shared memory containing only the data elements (excluding the header).
+        ///
+        /// Error: Returns an error if the shared memory creation fails. This can happen due to:
+        ///     - Insufficient permissions
+        ///     - Out of memory
+        ///     - Name conflicts
+        ///     - System-specific limitations
+        pub fn create(name: []const u8, allocator: ?std.mem.Allocator) !Self {
+            const size = @sizeOf(ShmHeader) + @sizeOf(S);
+            const result = try makeSharedMemory(name, size, allocator);
+
+            var header: *ShmHeader = extractHeader(result);
+
+            header.size_bytes = size;
+            header.total_elements = 1;
+
+            const header_size = @sizeOf(ShmHeader);
+
+            // @compileLog(T);
+            // @compileLog(S);
+            const data: T = @as(
+                *S,
+                @ptrCast(@alignCast(&result.data.ptr[header_size])),
+            );
+
+            return .{
+                .handle = result.fd,
+                .name = name,
+                .size = 1,
+                .ptr = result.data,
+                .data = data,
+                .allocator = allocator,
+            };
+        }
 
         /// Creates a new shared memory segment with the given name and size.
         ///
@@ -68,36 +146,29 @@ pub fn SharedMemory(comptime T: type) type {
         ///     - Out of memory
         ///     - Name conflicts
         ///     - System-specific limitations
-        pub fn create(name: []const u8, count: usize, allocator: ?std.mem.Allocator) !Self {
+        pub fn createWithLength(name: []const u8, count: usize, allocator: ?std.mem.Allocator) !Self {
             //const size = count * @sizeOf(T);
-            const size = @sizeOf(ShmHeader) + (count * @sizeOf(T));
-            const result: Shared = switch (tag) {
-                .linux, .freebsd => blk: {
-                    if (use_shm_funcs) {
-                        break :blk try posixCreate(name, size);
-                    }
-                    assert(allocator != null);
-                    if (allocator) |alloca| {
-                        break :blk try memfdBasedCreate(alloca, name, size);
-                    }
-                    return error.NoAllocatorForMemfdMeta;
-                },
-                .windows => try windowsCreate(name, size),
-                else => try posixCreate(name, size),
-            };
+            const size = @sizeOf(ShmHeader) + (count * @sizeOf(S));
+            const result = try makeSharedMemory(name, size, allocator);
 
-            // const header: ShmHeader = .{
-            //     .size_bytes = size,
-            //     .size_elements = count,
-            // };
-
-            const header_size = @sizeOf(ShmHeader);
-            var header: *ShmHeader = @ptrCast(@alignCast(result.data.ptr[0..header_size]));
+            var header: *ShmHeader = extractHeader(result);
 
             header.size_bytes = size;
             header.total_elements = count;
 
-            const data: []T = @as([*]T, @ptrCast(@alignCast(&result.data.ptr[header_size])))[0..count];
+            const header_size = @sizeOf(ShmHeader);
+
+            const data: T = switch (@typeInfo(S)) {
+                .pointer => |ptr| switch (ptr.size) {
+                    .slice => @as(
+                        [*]@typeInfo(S).pointer.child,
+                        @ptrCast(@alignCast(&result.data.ptr[header_size])),
+                    )[0..count],
+                    else => @as([*]S, @ptrCast(@alignCast(&result.data.ptr[header_size])))[0..count],
+                },
+                else => unreachable,
+            };
+
             return .{
                 .handle = result.fd,
                 .name = name,
@@ -146,15 +217,28 @@ pub fn SharedMemory(comptime T: type) type {
                 else => try posixOpen(name),
             };
 
-            // const count = @divFloor(result.size, @sizeOf(T));
-            // const data: []T = @as([*]T, @ptrCast(@alignCast(result.data.ptr)))[0..count];
-
             const header_size = @sizeOf(ShmHeader);
             const header: *ShmHeader = @ptrCast(@alignCast(result.data.ptr[0..header_size]));
 
             const count = header.total_elements;
 
-            const data: []T = @as([*]T, @ptrCast(@alignCast(&result.data.ptr[header_size])))[0..count];
+            const data: T = switch (@typeInfo(S)) {
+                .pointer => |ptr| switch (ptr.size) {
+                    .slice => @as(
+                        [*]@typeInfo(S).pointer.child,
+                        @ptrCast(@alignCast(&result.data.ptr[header_size])),
+                    )[0..count],
+                    else => @compileError("here"),
+                },
+                .array => @as(
+                    T,
+                    @ptrCast(@alignCast(&result.data.ptr[header_size])),
+                ),
+                else => @as(
+                    *S,
+                    @ptrCast(@alignCast(&result.data.ptr[header_size])),
+                ),
+            };
 
             return .{
                 .handle = result.fd,
@@ -949,23 +1033,24 @@ test "SharedMemory - Single Struct" {
 
     const shm_name = "/test_single_struct";
     const count = 1;
+    _ = count;
 
     //posixForceClose(shm_name);
 
-    var shm: SharedStruct = try SharedStruct.create(shm_name, count, alloca);
+    var shm: SharedStruct = try SharedStruct.create(shm_name, alloca);
     defer shm.close();
 
-    shm.data[0] = .{ .x = 42, .y = 3.14 };
+    shm.data.* = .{ .x = 42, .y = 3.14 };
 
     // Open the shared memory in another "process"
     var shm2 = try SharedStruct.open(shm_name, alloca);
     defer shm2.close();
 
-    try std.testing.expectEqual(@as(i32, 42), shm2.data[0].x);
-    try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data[0].y, 0.001);
+    try std.testing.expectEqual(@as(i32, 42), shm2.data.x);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.y, 0.001);
 }
 
-test "SharedMemory - Array" {
+test "SharedMemory - Array Fixed Length" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloca = switch (tag) {
@@ -983,9 +1068,9 @@ test "SharedMemory - Array" {
 
     // posixForceClose(shm_name);
 
-    const SharedI32 = SharedMemory(i32);
+    const SharedI32 = SharedMemory([array_size]i32);
 
-    var shm = try SharedI32.create(shm_name, array_size, alloca);
+    var shm: SharedI32 = try SharedI32.create(shm_name, alloca);
     defer shm.close();
 
     for (shm.data, 0..) |*item, i| {
@@ -998,6 +1083,45 @@ test "SharedMemory - Array" {
 
     for (shm2.data, 0..) |item, i| {
         try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
+        // std.debug.print("data @ idx:{d} -> {d}\n", .{ i, item });
+    }
+    try std.testing.expectEqualSlices(i32, &expected, shm2.data);
+}
+
+test "SharedMemory - Array Runtime Length" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloca = switch (tag) {
+        .linux, .freebsd => gpa.allocator(),
+        else => null,
+    };
+
+    const array_size = 20;
+    var expected = [_]i32{0} ** array_size;
+    for (0..array_size) |i| {
+        expected[i] = @intCast(i * 2);
+    }
+
+    const shm_name = "/test_array";
+
+    // posixForceClose(shm_name);
+
+    const SharedI32 = SharedMemory([]i32);
+
+    var shm: SharedI32 = try SharedI32.createWithLength(shm_name, array_size, alloca);
+    defer shm.close();
+
+    for (shm.data, 0..) |*item, i| {
+        item.* = @intCast(i * 2);
+    }
+
+    // Open the shared memory in another "process"
+    var shm2 = try SharedI32.open(shm_name, alloca);
+    defer shm2.close();
+
+    for (shm2.data, 0..) |item, i| {
+        try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
+        // std.debug.print("data @ idx:{d} -> {d}\n", .{ i, item });
     }
     try std.testing.expectEqualSlices(i32, &expected, shm2.data);
 }
@@ -1022,20 +1146,18 @@ test "SharedMemory - Structure with String" {
 
     //posixForceClose(shm_name);
 
-    const count = 1;
-
-    var shm = try SharedTestStruct.create(shm_name, count, alloca);
+    var shm = try SharedTestStruct.create(shm_name, alloca);
     defer shm.close();
 
-    shm.data[0].id = 42;
-    shm.data[0].float = 3.14;
-    _ = std.fmt.bufPrint(&shm.data[0].string, "Hello, SHM!", .{}) catch unreachable;
+    shm.data.id = 42;
+    shm.data.float = 3.14;
+    _ = std.fmt.bufPrint(&shm.data.string, "Hello, SHM!", .{}) catch unreachable;
 
     // Open the shared memory in another "process"
     var shm2 = try SharedTestStruct.open(shm_name, alloca);
     defer shm2.close();
 
-    try std.testing.expectEqual(@as(i32, 42), shm2.data[0].id);
-    try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data[0].float, 0.001);
-    try std.testing.expectEqualStrings("Hello, SHM!", std.mem.sliceTo(&shm2.data[0].string, 0));
+    try std.testing.expectEqual(@as(i32, 42), shm2.data.id);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.float, 0.001);
+    try std.testing.expectEqualStrings("Hello, SHM!", std.mem.sliceTo(&shm2.data.string, 0));
 }
