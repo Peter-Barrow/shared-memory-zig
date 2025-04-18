@@ -51,12 +51,12 @@ pub fn SharedMemory(comptime S: type) type {
         data: T,
         allocator: ?std.mem.Allocator,
 
-        fn extractHeader(shared: Shared) *ShmHeader {
+        pub fn extractHeader(shared: Shared) *ShmHeader {
             const header_size = @sizeOf(ShmHeader);
             return @ptrCast(@alignCast(shared.data.ptr[0..header_size]));
         }
 
-        fn makeSharedMemory(name: []const u8, size: usize, allocator: ?std.mem.Allocator) !Shared {
+        pub fn makeSharedMemory(name: []const u8, size: usize, allocator: ?std.mem.Allocator) !Shared {
             return switch (tag) {
                 .linux, .freebsd => blk: {
                     if (use_shm_funcs) {
@@ -304,7 +304,7 @@ pub fn SharedMemory(comptime S: type) type {
     };
 }
 
-const Shared = struct {
+pub const Shared = struct {
     // data: []align(4096) u8,
     data: []u8,
     size: usize,
@@ -332,7 +332,7 @@ fn xgdRunTimePath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
 }
 
 /// Metadata about a memfd file that is stored on disk
-const XdgMemfdMeta = struct {
+pub const XdgMemfdMeta = struct {
     pid: pid_t,
     fd: std.fs.File.Handle,
     size: usize,
@@ -341,7 +341,7 @@ const XdgMemfdMeta = struct {
 
 /// Writes metadata about a memfd file to disk
 /// The metadata is stored in the XDG runtime directory
-fn writeMemfdMeta(allocator: std.mem.Allocator, name: []const u8, meta: XdgMemfdMeta) !void {
+pub fn writeMemfdMeta(allocator: std.mem.Allocator, name: []const u8, meta: XdgMemfdMeta) !void {
     const meta_path = try xgdRunTimePath(allocator, name);
     defer allocator.free(meta_path);
 
@@ -357,7 +357,7 @@ fn writeMemfdMeta(allocator: std.mem.Allocator, name: []const u8, meta: XdgMemfd
 /// Reads metadata about a memfd file from disk
 /// If the process that created the memfd no longer exists, the metadata file is deleted
 /// Returns error.IncorrectSize if the metadata file is corrupted
-fn readMemfdMeta(allocator: std.mem.Allocator, name: []const u8) !XdgMemfdMeta {
+pub fn readMemfdMeta(allocator: std.mem.Allocator, name: []const u8) !XdgMemfdMeta {
     const meta_path = try xgdRunTimePath(allocator, name);
     defer allocator.free(meta_path);
 
@@ -379,7 +379,7 @@ fn readMemfdMeta(allocator: std.mem.Allocator, name: []const u8) !XdgMemfdMeta {
 
 /// Deletes the metadata file for a memfd if it exists
 /// Does nothing if the file doesn't exist or can't be deleted
-fn deleteMemfdMeta(allocator: std.mem.Allocator, name: []const u8) void {
+pub fn deleteMemfdMeta(allocator: std.mem.Allocator, name: []const u8) void {
     const meta_path = xgdRunTimePath(allocator, name) catch return;
     defer allocator.free(meta_path);
     std.fs.deleteFileAbsolute(meta_path) catch return;
@@ -407,7 +407,7 @@ fn deleteMemfdMeta(allocator: std.mem.Allocator, name: []const u8) void {
 ///     - memfd_create failure
 ///     - ftruncate failure
 ///     - mmap failure
-fn memfdBasedCreate(allocator: std.mem.Allocator, name: []const u8, size: usize) !Shared {
+pub fn memfdBasedCreate(allocator: std.mem.Allocator, name: []const u8, size: usize) !Shared {
     const n = if (fileNameStartsWithSlash(name)) name else name[1..name.len];
     // std.debug.print("name (n):\t{s}\n", .{n});
     const fd = try std.posix.memfd_create(n, 0);
@@ -472,7 +472,7 @@ fn memfdBasedCreate(allocator: std.mem.Allocator, name: []const u8, size: usize)
 ///     - File open failure
 ///     - fstat failure
 ///     - mmap failure
-fn memfdBasedOpen(allocator: std.mem.Allocator, name: []const u8) !Shared {
+pub fn memfdBasedOpen(allocator: std.mem.Allocator, name: []const u8) !Shared {
 
     // const meta = try readMemfdMeta(allocator, name) catch return error.SharedMemoryNotFound;
     const n = if (fileNameStartsWithSlash(name)) name else name[1..name.len];
@@ -518,7 +518,7 @@ fn memfdBasedOpen(allocator: std.mem.Allocator, name: []const u8) !Shared {
 ///
 /// Note: This function does not throw errors. A false return could mean either that the
 /// segment doesn't exist or that there was an error checking for its existence.
-fn memfdBasedExists(allocator: std.mem.Allocator, name: []const u8) bool {
+pub fn memfdBasedExists(allocator: std.mem.Allocator, name: []const u8) bool {
     // std.debug.print("name to test existence:\t{s}\n", .{name});
     const n = if (fileNameStartsWithSlash(name)) name[1..] else name;
     const handle = std.fs.openFileAbsolute(n, .{}) catch return false;
@@ -540,7 +540,7 @@ fn memfdBasedExists(allocator: std.mem.Allocator, name: []const u8) bool {
 ///
 /// Note: This function does not remove the memfd from the system. The memfd will be automatically
 /// cleaned up when all references to it are closed.
-fn memfdBasedClose(
+pub fn memfdBasedClose(
     allocator: std.mem.Allocator,
     ptr: ?[]u8,
     fd: std.fs.File.Handle,
@@ -574,7 +574,7 @@ fn memfdBasedClose(
 ///     - shm_open failure
 ///     - ftruncate failure
 ///     - mmap failure
-fn posixCreate(name: []const u8, size: usize) !Shared {
+pub fn posixCreate(name: []const u8, size: usize) !Shared {
     assert(posixMapExists(name) == false);
 
     const permissions: std.posix.mode_t = 0o666;
@@ -644,7 +644,7 @@ fn posixCreate(name: []const u8, size: usize) !Shared {
 ///     - shm_open failure
 ///     - fstat failure
 ///     - mmap failure
-fn posixOpen(name: []const u8) !Shared {
+pub fn posixOpen(name: []const u8) !Shared {
     assert(posixMapExists(name) == true);
 
     const permissions: std.posix.mode_t = 0o666;
@@ -704,7 +704,7 @@ fn posixOpen(name: []const u8) !Shared {
 ///
 /// Note: This function does not throw errors. A false return could mean either that the
 /// segment doesn't exist or that there was an error checking for its existence.
-fn posixMapExists(name: []const u8) bool {
+pub fn posixMapExists(name: []const u8) bool {
     const flags: std.posix.O = .{
         .ACCMODE = .RDONLY,
     };
@@ -725,7 +725,7 @@ fn posixMapExists(name: []const u8) bool {
 ///
 /// Args:
 ///     name: The name of the shared memory segment to close.
-fn posixForceClose(name: []const u8) void {
+pub fn posixForceClose(name: []const u8) void {
     var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
     const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
     const rc = std.c.shm_unlink(name_z);
@@ -746,7 +746,7 @@ fn posixForceClose(name: []const u8) void {
 ///
 /// Note: After calling this function, the shared memory segment will be removed from the system
 /// and will no longer be accessible by any process.
-fn posixClose(ptr: ?[]u8, fd: std.fs.File.Handle, name: []const u8) void {
+pub fn posixClose(ptr: ?[]u8, fd: std.fs.File.Handle, name: []const u8) void {
     if (ptr) |p| std.posix.munmap(@alignCast(p));
 
     std.posix.close(fd);
@@ -789,7 +789,7 @@ fn posixClose(ptr: ?[]u8, fd: std.fs.File.Handle, name: []const u8) void {
 /// Error: Returns an error if the shared memory creation fails, including:
 ///     - CreateFileMappingA failure
 ///     - MapViewOfFile failure
-fn windowsCreate(name: []const u8, size: usize) !Shared {
+pub fn windowsCreate(name: []const u8, size: usize) !Shared {
     assert(windowsMapExists(name) == false);
 
     var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
@@ -863,7 +863,7 @@ fn windowsCreate(name: []const u8, size: usize) !Shared {
 /// Error: Returns an error if the shared memory cannot be opened, including:
 ///     - OpenFileMappingA failure
 ///     - MapViewOfFile failure
-fn windowsOpen(name: []const u8) !Shared {
+pub fn windowsOpen(name: []const u8) !Shared {
     assert(windowsMapExists(name) == true);
 
     var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
@@ -934,7 +934,7 @@ fn windowsOpen(name: []const u8) !Shared {
 ///
 /// Note: This function does not throw errors. A false return could mean either that the
 /// segment doesn't exist or that there was an error checking for its existence.
-fn windowsMapExists(name: []const u8) bool {
+pub fn windowsMapExists(name: []const u8) bool {
     var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
     const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
 
@@ -973,7 +973,7 @@ fn windowsMapExists(name: []const u8) bool {
 ///
 /// Note: After calling this function, the shared memory segment will no longer be accessible
 /// by this process, but it may still exist in the system if other processes are using it.
-fn windowsClose(ptr: ?[]u8, handle: std.os.windows.HANDLE, name: []const u8) void {
+pub fn windowsClose(ptr: ?[]u8, handle: std.os.windows.HANDLE, name: []const u8) void {
     assert(windowsMapExists(name) == true);
     //if (ptr) |p| _ = winMem.UnmapViewOfFile;
     if (ptr) |p| {
@@ -1032,8 +1032,6 @@ test "SharedMemory - Single Struct" {
     const SharedStruct = SharedMemory(TestStruct);
 
     const shm_name = "/test_single_struct";
-    const count = 1;
-    _ = count;
 
     //posixForceClose(shm_name);
 
