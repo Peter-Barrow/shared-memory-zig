@@ -56,24 +56,19 @@ const TestStruct = struct {
 
 const shm_name = "/test_struct_with_string";
 
-const count = 1;
-
-var shm = try shmem.SharedMemory(TestStruct).create(shm_name, count);
+var shm: SharedStruct = try SharedStruct.create(shm_name, alloca);
 defer shm.close();
 
-shm.data.id = 42;
-shm.data.float = 3.14;
-_ = std.fmt.bufPrint(&shm.data.string, "Hello, SHM!", .{}) catch unreachable;
+shm.data.* = .{ .x = 42, .y = 3.14 };
 
 // Open the shared memory in another "process"
-var shm2 = try shmem.SharedMemory(TestStruct).open(shm_name);
+var shm2 = try SharedStruct.open(shm_name, alloca);
 defer shm2.close();
 
-try std.testing.expectEqual(@as(i32, 42), shm2.data.id);
-try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.float, 0.001);
-try std.testing.expectEqualStrings("Hello, SHM!", std.mem.sliceTo(&shm2.data.string, 0));
-
+try std.testing.expectEqual(@as(i32, 42), shm2.data.x);
+try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.y, 0.001);
 ```
+
 ### Create a shared array of comptime known length
 ``` zig
 const shmem = @import("shared_memory");
