@@ -15,6 +15,10 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    _ = b.addModule("shared_memory", .{
+        .root_source_file = b.path("shared_memory.zig"),
+    });
+
     const zigwin32 = b.dependency("zigwin32", .{}).module("win32");
     const known_folders = b.dependency("known_folders", .{}).module("known-folders");
 
