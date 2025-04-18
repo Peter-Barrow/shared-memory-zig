@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     ) orelse false;
 
     const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("shared_memory.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = use_shm_funcs,
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_unit_tests.step);
 
     const unit_test_check = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("shared_memory.zig"),
         .target = target,
         .optimize = optimize,
     });
