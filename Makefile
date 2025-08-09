@@ -11,4 +11,4 @@ test_windows:
 	zig build test -Dtarget=x86_64-windows-msvc
 
 .PHONY: test_all
-test_all: test_linux test_windows
+test_all: test_linux test_linux_libc test_windows

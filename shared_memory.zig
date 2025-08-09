@@ -584,7 +584,7 @@ pub fn posixCreate(name: []const u8, size: usize) !Shared {
         .EXCL = true,
     };
 
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
+    var buffer = [_]u8{0} ** std.fs.max_name_bytes;
     const name_z = try std.fmt.bufPrintZ(&buffer, "{s}", .{name});
     const fd = std.c.shm_open(name_z, @bitCast(flags), permissions);
 
@@ -652,7 +652,7 @@ pub fn posixOpen(name: []const u8) !Shared {
         .ACCMODE = .RDWR,
     };
 
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
+    var buffer = [_]u8{0} ** std.fs.max_name_bytes;
     const name_z = try std.fmt.bufPrintZ(&buffer, "{s}", .{name});
     const fd = std.c.shm_open(name_z, @bitCast(flags), permissions);
     if (fd == -1) {
@@ -726,7 +726,7 @@ pub fn posixMapExists(name: []const u8) bool {
 /// Args:
 ///     name: The name of the shared memory segment to close.
 pub fn posixForceClose(name: []const u8) void {
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
+    var buffer = [_]u8{0} ** std.fs.max_name_bytes;
     const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
     const rc = std.c.shm_unlink(name_z);
     _ = rc;
@@ -751,7 +751,7 @@ pub fn posixClose(ptr: ?[]u8, fd: std.fs.File.Handle, name: []const u8) void {
 
     std.posix.close(fd);
 
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
+    var buffer = [_]u8{0} ** std.fs.max_name_bytes;
     const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
     const rc = std.c.shm_unlink(name_z);
     _ = rc;
@@ -792,7 +792,7 @@ pub fn posixClose(ptr: ?[]u8, fd: std.fs.File.Handle, name: []const u8) void {
 pub fn windowsCreate(name: []const u8, size: usize) !Shared {
     assert(windowsMapExists(name) == false);
 
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
+    var buffer = [_]u8{0} ** std.fs.max_name_bytes;
     const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
 
     const handle_maybe: ?std.os.windows.HANDLE = winMem.CreateFileMappingA(
@@ -866,7 +866,7 @@ pub fn windowsCreate(name: []const u8, size: usize) !Shared {
 pub fn windowsOpen(name: []const u8) !Shared {
     assert(windowsMapExists(name) == true);
 
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
+    var buffer = [_]u8{0} ** std.fs.max_name_bytes;
     const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
 
     const handle_flags: winMem.FILE_MAP = .{
@@ -905,7 +905,10 @@ pub fn windowsOpen(name: []const u8) !Shared {
 
     if (ptr_maybe) |p| {
         ptr.ptr = @alignCast(@ptrCast(p));
-        const header: ShmHeader = @as(*ShmHeader, @ptrCast(@alignCast(ptr.ptr[0..@sizeOf(ShmHeader)]))).*;
+        const header: ShmHeader = @as(
+            *ShmHeader,
+            @ptrCast(@alignCast(ptr.ptr[0..@sizeOf(ShmHeader)])),
+        ).*;
         size = header.size_bytes;
         ptr.len = @intCast(size);
     } else {
@@ -935,7 +938,7 @@ pub fn windowsOpen(name: []const u8) !Shared {
 /// Note: This function does not throw errors. A false return could mean either that the
 /// segment doesn't exist or that there was an error checking for its existence.
 pub fn windowsMapExists(name: []const u8) bool {
-    var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
+    var buffer = [_]u8{0} ** std.fs.max_name_bytes;
     const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
 
     const handle_flags: winMem.FILE_MAP = .{
@@ -1033,7 +1036,9 @@ test "SharedMemory - Single Struct" {
 
     const shm_name = "/test_single_struct";
 
-    //posixForceClose(shm_name);
+    if (tag != .windows) {
+        if (use_shm_funcs) posixForceClose(shm_name);
+    }
 
     var shm: SharedStruct = try SharedStruct.create(shm_name, alloca);
     defer shm.close();
@@ -1062,9 +1067,11 @@ test "SharedMemory - Array Fixed Length" {
         expected[i] = @intCast(i * 2);
     }
 
-    const shm_name = "/test_array";
+    const shm_name = "/test_array_fixed_length";
 
-    // posixForceClose(shm_name);
+    if (tag != .windows) {
+        if (use_shm_funcs) posixForceClose(shm_name);
+    }
 
     const SharedI32 = SharedMemory([array_size]i32);
 
@@ -1100,9 +1107,11 @@ test "SharedMemory - Array Runtime Length" {
         expected[i] = @intCast(i * 2);
     }
 
-    const shm_name = "/test_array";
+    const shm_name = "/test_array_runtime_length";
 
-    // posixForceClose(shm_name);
+    if (tag != .windows) {
+        if (use_shm_funcs) posixForceClose(shm_name);
+    }
 
     const SharedI32 = SharedMemory([]i32);
 
@@ -1142,7 +1151,9 @@ test "SharedMemory - Structure with String" {
 
     const shm_name = "/test_struct_with_string";
 
-    //posixForceClose(shm_name);
+    if (tag != .windows) {
+        if (use_shm_funcs) posixForceClose(shm_name);
+    }
 
     var shm = try SharedTestStruct.create(shm_name, alloca);
     defer shm.close();

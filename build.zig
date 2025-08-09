@@ -29,11 +29,17 @@ pub fn build(b: *std.Build) void {
         "Use shm_open and shm_unlink instead of memfd_create",
     ) orelse false;
 
-    const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("shared_memory.zig"),
-        .target = target,
+    const test_module = b.createModule(.{
         .optimize = optimize,
+        .target = target,
+        .root_source_file = b.path("shared_memory.zig"),
         .link_libc = use_shm_funcs,
+    });
+
+    const lib_unit_tests = b.addTest(.{
+        .name = "test",
+        .root_module = test_module,
+        // .link_libc = use_shm_funcs,
     });
 
     const options = b.addOptions();
@@ -51,9 +57,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_unit_tests.step);
 
     const unit_test_check = b.addTest(.{
-        .root_source_file = b.path("shared_memory.zig"),
-        .target = target,
-        .optimize = optimize,
+        // .root_source_file = b.path("shared_memory.zig"),
+        .name = "test",
+        .root_module = test_module,
     });
 
     unit_test_check.root_module.addOptions("config", options);
