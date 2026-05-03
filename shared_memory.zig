@@ -1209,7 +1209,7 @@ pub const RawMapping = struct {
 
 pub const VTable = struct {
     createRaw: *const fn (ptr: *anyopaque, name: []const u8, size: usize) anyerror!RawMapping,
-    openRaw: *const fn (ptr: *anyopaque, name: []const u8, size: usize) anyerror!RawMapping,
+    openRaw: *const fn (ptr: *anyopaque, name: []const u8) anyerror!RawMapping,
     closeRaw: *const fn (ptr: *anyopaque, mapping: RawMapping, name: []const u8) void,
     exists: *const fn (ptr: *anyopaque, name: []const u8, size: usize) bool,
 };
@@ -1222,8 +1222,8 @@ pub const SHMBackend = struct {
         return try self.vtable.createRaw(self.ptr, name, size);
     }
 
-    pub fn openRaw(self: SHMBackend, name: []const u8, size: usize) !RawMapping {
-        return try self.vtable.openRaw(self.ptr, name, size);
+    pub fn openRaw(self: SHMBackend, name: []const u8) !RawMapping {
+        return try self.vtable.openRaw(self.ptr, name);
     }
 
     pub fn closeRaw(self: SHMBackend, mapping: RawMapping, name: []const u8) void {
@@ -1384,6 +1384,180 @@ pub const PosixBackend = struct {
         const rc = std.c.shm_open(name_z, @bitCast(flags), 0o444);
     
         if (rc >= 0) {
+            return true;
+        }
+    
+        return false;
+    }
+};
+
+pub const WindowsBackend = struct {
+
+    pub const vtable: VTable = .{
+        .createRaw = create,
+        .openRaw = open,
+        .closeRaw = close,
+        .exists = exists,
+    };
+
+    fn create(context: *anyopaque,name: []const u8, size: usize) !RawMapping {
+        _ = context;
+        assert(exists(name) == false);
+    
+        var buffer = [_]u8{0} ** std.fs.max_name_bytes;
+        const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
+    
+        const handle_maybe: ?std.os.windows.HANDLE = winMem.CreateFileMappingA(
+            windows.INVALID_HANDLE_VALUE,
+            null,
+            .{
+                .PAGE_EXECUTE_READWRITE = 1,
+            },
+            0,
+            @intCast(size),
+            name_z,
+        );
+    
+        var handle: std.os.windows.HANDLE = std.os.windows.INVALID_HANDLE_VALUE;
+        if (handle_maybe) |h| {
+            handle = h;
+        } else {
+            switch (std.os.windows.kernel32.GetLastError()) {
+                else => |err| return std.os.windows.unexpectedError(err),
+            }
+        }
+    
+        const ptr_maybe = winMem.MapViewOfFile(
+            handle,
+            .{
+                .READ = 1,
+                .WRITE = 1,
+            },
+            0,
+            0,
+            size,
+        );
+    
+        var ptr: []align(4096) u8 = undefined;
+    
+        if (ptr_maybe) |p| {
+            ptr.ptr = @ptrCast(@alignCast(p));
+            // ptr.len = size;
+        } else {
+            switch (std.os.windows.kernel32.GetLastError()) {
+                else => |err| return std.os.windows.unexpectedError(err),
+            }
+        }
+    
+        assert(exists(name) == true);
+    
+        return .{
+            .data = ptr[0..@as(usize, @intCast(size))],
+            .size = size,
+            .fd = handle,
+        };
+    }
+
+    fn open(context: *anyopaque, name: []const u8) !RawMapping {
+        _ = context;
+        assert(exists(name) == true);
+    
+        var buffer = [_]u8{0} ** std.fs.max_name_bytes;
+        const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
+    
+        const handle_flags: winMem.FILE_MAP = .{
+            .READ = 1,
+            .WRITE = 1,
+        };
+    
+        const handle_maybe = winMem.OpenFileMappingA(
+            @bitCast(handle_flags),
+            winZig.FALSE,
+            name_z,
+        );
+    
+        var handle: std.os.windows.HANDLE = std.os.windows.INVALID_HANDLE_VALUE;
+        if (handle_maybe) |h| {
+            handle = h;
+        } else {
+            switch (std.os.windows.kernel32.GetLastError()) {
+                else => |err| return std.os.windows.unexpectedError(err),
+            }
+        }
+    
+        const ptr_maybe = winMem.MapViewOfFile(
+            handle,
+            .{
+                .READ = 1,
+                .WRITE = 1,
+            },
+            0,
+            0,
+            0,
+        );
+    
+        var size: usize = 0;
+        var ptr: []u8 = undefined;
+    
+        if (ptr_maybe) |p| {
+            ptr.ptr = @ptrCast(@alignCast(p));
+            const header: ShmHeader = @as(
+                *ShmHeader,
+                @ptrCast(@alignCast(ptr.ptr[0..@sizeOf(ShmHeader)])),
+            ).*;
+            size = header.size_bytes;
+            ptr.len = @intCast(size);
+        } else {
+            switch (std.os.windows.kernel32.GetLastError()) {
+                else => |err| return std.os.windows.unexpectedError(err),
+            }
+        }
+    
+        return .{
+            .data = ptr[0..@as(usize, @intCast(size))],
+            .size = @intCast(size - 1),
+            .fd = handle,
+        };
+    }
+
+    fn close(context: *anyopaque, mapping: RawMapping, name: []const u8) void {
+        _ = context;
+        assert(exists(name) == true);
+        //if (ptr) |p| _ = winMem.UnmapViewOfFile;
+        // if (ptr) |p| {
+        //     _ = winMem.UnmapViewOfFile(@ptrCast(p.ptr)) == winZig.FALSE;
+        //     // if (winMem.UnmapViewOfFile(@ptrCast(p.ptr)) == winZig.FALSE) {
+        //     //     switch (std.os.windows.kernel32.GetLastError()) {
+        //     //         else => |err| return std.os.windows.unexpectedError(err),
+        //     //     }
+        //     // }
+        // }
+        _ = winMem.UnmapViewOfFile(@ptrCast(mapping.data.ptr)) == winZig.FALSE;
+        windows.CloseHandle(mapping.fd);
+        assert(exists(name) == false);
+    }
+
+    fn exists(context: *anyopaque, name: []const u8) bool {
+        _ = context;
+        var buffer = [_]u8{0} ** std.fs.max_name_bytes;
+        const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
+    
+        const handle_flags: winMem.FILE_MAP = .{
+            .READ = 1,
+            .WRITE = 1,
+        };
+    
+        const handle = winMem.OpenFileMappingA(
+            @bitCast(handle_flags),
+            winZig.FALSE,
+            name_z,
+        );
+    
+        if (handle) |h| {
+            const file: std.fs.File = .{
+                .handle = h,
+            };
+            file.close();
             return true;
         }
     
