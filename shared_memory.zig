@@ -31,295 +31,295 @@ const ShmHeader = struct {
     total_elements: usize,
 };
 
-pub fn SharedMemory(comptime S: type) type {
-    return struct {
-        const Self = @This();
-        const T = switch (@typeInfo(S)) {
-            .pointer => |ptr| switch (ptr.size) {
-                .slice => S,
-                else => []S,
-            },
-            .array => *S,
-            else => *S,
-        };
-
-        include_header: bool,
-        handle: std.fs.File.Handle,
-        name: []const u8,
-        size: usize,
-        ptr: ?[]u8,
-        data: T,
-        // allocator: ?std.mem.Allocator,
-
-        pub const empty: Self = .{
-            .include_header = false,
-            .handle = undefined,
-            .name = undefined,
-            .size = 0,
-            .ptr = null,
-            .data = undefined,
-        };
-
-        pub const emptyWithHeader: Self = blk: {
-            var new = Self.empty;
-            new.include_header = true;
-            break :blk new;
-        };
-
-        pub fn header(shared: Shared) *ShmHeader {
-            const header_size = @sizeOf(ShmHeader);
-            return @ptrCast(@alignCast(shared.data.ptr[0..header_size]));
-        }
-
-        pub fn init(name: []const u8, size: usize) !Self {}
-
-        pub fn makeSharedMemory(name: []const u8, size: usize, allocator: ?std.mem.Allocator) !Shared {
-            return switch (tag) {
-                .linux, .freebsd => blk: {
-                    if (use_shm_funcs) {
-                        break :blk try posixCreate(name, size);
-                    }
-                    assert(allocator != null);
-                    if (allocator) |alloca| {
-                        break :blk try memfdBasedCreate(alloca, name, size);
-                    }
-                    return error.NoAllocatorForMemfdMeta;
-                },
-                .windows => try windowsCreate(name, size),
-                else => try posixCreate(name, size),
-            };
-        }
-
-        /// Creates a new shared memory segment with the given name and fixed size.
-        ///
-        /// This function creates a new shared memory segment that can be accessed by multiple processes.
-        /// It allocates space for a header (ShmHeader) and the requested number of type T.
-        ///
-        /// Args:
-        ///     name: The name of the shared memory segment. This should be unique across the system.
-        ///     allocator: Optional allocator, this is a requirement for using memfd
-        ///
-        /// Returns:
-        ///     A new Self instance representing the created shared memory. This includes:
-        ///     - handle: The file handle for the shared memory.
-        ///     - name: The name of the shared memory segment.
-        ///     - size: The number of elements allocated.
-        ///     - ptr: A pointer to the entire shared memory block.
-        ///     - data: A slice of the shared memory containing only the data elements (excluding the header).
-        ///
-        /// Error: Returns an error if the shared memory creation fails. This can happen due to:
-        ///     - Insufficient permissions
-        ///     - Out of memory
-        ///     - Name conflicts
-        ///     - System-specific limitations
-        pub fn create(name: []const u8, allocator: ?std.mem.Allocator) !Self {
-            const size = @sizeOf(ShmHeader) + @sizeOf(S);
-            const result = try makeSharedMemory(name, size, allocator);
-
-            var header: *ShmHeader = header(result);
-
-            header.size_bytes = size;
-            header.total_elements = 1;
-
-            const header_size = @sizeOf(ShmHeader);
-
-            // @compileLog(T);
-            // @compileLog(S);
-            const data: T = @as(
-                *S,
-                @ptrCast(@alignCast(&result.data.ptr[header_size])),
-            );
-
-            return .{
-                .handle = result.fd,
-                .name = name,
-                .size = 1,
-                .ptr = result.data,
-                .data = data,
-                // .allocator = allocator,
-            };
-        }
-
-        /// Creates a new shared memory segment with the given name and size.
-        ///
-        /// This function creates a new shared memory segment that can be accessed by multiple processes.
-        /// It allocates space for a header (ShmHeader) and the requested number of elements of type T.
-        ///
-        /// Args:
-        ///     name: The name of the shared memory segment. This should be unique across the system.
-        ///     count: The number of elements of type T to allocate in the shared memory.
-        ///     allocator: Optional allocator, this is a requirement for using memfd
-        ///
-        /// Returns:
-        ///     A new Self instance representing the created shared memory. This includes:
-        ///     - handle: The file handle for the shared memory.
-        ///     - name: The name of the shared memory segment.
-        ///     - size: The number of elements allocated.
-        ///     - ptr: A pointer to the entire shared memory block.
-        ///     - data: A slice of the shared memory containing only the data elements (excluding the header).
-        ///
-        /// Error: Returns an error if the shared memory creation fails. This can happen due to:
-        ///     - Insufficient permissions
-        ///     - Out of memory
-        ///     - Name conflicts
-        ///     - System-specific limitations
-        pub fn createWithLength(name: []const u8, count: usize, allocator: ?std.mem.Allocator) !Self {
-            //const size = count * @sizeOf(T);
-            const size = @sizeOf(ShmHeader) + (count * @sizeOf(S));
-            const result = try makeSharedMemory(name, size, allocator);
-
-            var header: *ShmHeader = header(result);
-
-            header.size_bytes = size;
-            header.total_elements = count;
-
-            const header_size = @sizeOf(ShmHeader);
-
-            const data: T = switch (@typeInfo(S)) {
-                .pointer => |ptr| switch (ptr.size) {
-                    .slice => @as(
-                        [*]@typeInfo(S).pointer.child,
-                        @ptrCast(@alignCast(&result.data.ptr[header_size])),
-                    )[0..count],
-                    else => @as([*]S, @ptrCast(@alignCast(&result.data.ptr[header_size])))[0..count],
-                },
-                else => unreachable,
-            };
-
-            return .{
-                .handle = result.fd,
-                .name = name,
-                .size = count,
-                .ptr = result.data,
-                .data = data,
-                // .allocator = allocator,
-            };
-        }
-
-        /// Opens an existing shared memory segment with the given name.
-        ///
-        /// This function attempts to open a previously created shared memory segment.
-        /// It reads the header information to determine the size and layout of the shared memory.
-        ///
-        /// Args:
-        ///     name: The name of the shared memory segment to open. This should match the name used in create().
-        ///     allocator: Optional allocator, this is a requirement for using memfd
-        ///
-        /// Returns:
-        ///     A Self instance representing the opened shared memory. This includes:
-        ///     - handle: The file handle for the shared memory.
-        ///     - name: The name of the shared memory segment.
-        ///     - size: The number of elements in the shared memory.
-        ///     - ptr: A pointer to the entire shared memory block.
-        ///     - data: A slice of the shared memory containing only the data elements (excluding the header).
-        ///
-        /// Error: Returns an error if the shared memory cannot be opened. This can happen due to:
-        ///     - The shared memory segment does not exist
-        ///     - Insufficient permissions
-        ///     - System-specific errors in opening or mapping the shared memory
-        pub fn open(name: []const u8, allocator: ?std.mem.Allocator) !Self {
-            const result = switch (tag) {
-                .linux, .freebsd => blk: {
-                    if (use_shm_funcs) {
-                        break :blk try posixOpen(name);
-                    }
-                    assert(allocator != null);
-                    // break :blk if (allocator) |alloca| try memfdBasedOpen(alloca, name);
-                    if (allocator) |alloca| {
-                        break :blk try memfdBasedOpen(alloca, name);
-                    }
-                    return error.NoAllocatorForMemfdMeta;
-                },
-                .windows => try windowsOpen(name),
-                else => try posixOpen(name),
-            };
-
-            const header_size = @sizeOf(ShmHeader);
-            const header: *ShmHeader = @ptrCast(@alignCast(result.data.ptr[0..header_size]));
-
-            const count = header.total_elements;
-
-            const data: T = switch (@typeInfo(S)) {
-                .pointer => |ptr| switch (ptr.size) {
-                    .slice => @as(
-                        [*]@typeInfo(S).pointer.child,
-                        @ptrCast(@alignCast(&result.data.ptr[header_size])),
-                    )[0..count],
-                    else => @compileError("here"),
-                },
-                .array => @as(
-                    T,
-                    @ptrCast(@alignCast(&result.data.ptr[header_size])),
-                ),
-                else => @as(
-                    *S,
-                    @ptrCast(@alignCast(&result.data.ptr[header_size])),
-                ),
-            };
-
-            return .{
-                .handle = result.fd,
-                .name = name,
-                .size = count,
-                .ptr = result.data,
-                .data = data,
-                // .allocator = allocator,
-            };
-        }
-
-        /// Checks if a shared memory segment with the given name exists.
-        ///
-        /// This function attempts to detect whether a shared memory segment with the specified name
-        /// is currently present in the system.
-        ///
-        /// Args:
-        ///     path: The name or path of the shared memory segment to check. The exact format
-        ///           may depend on the operating system and the method used to create the segment.
-        ///
-        ///     allocator: Optional allocator, this is a requirement for using memfd
-        /// Returns:
-        ///     true if the shared memory segment exists and is accessible, false otherwise.
-        ///
-        /// Note: This function does not throw errors. A false return could mean either that the
-        /// segment doesn't exist or that there was an error checking for its existence.
-        pub fn exists(path: []const u8, allocator: ?std.mem.Allocator) bool {
-            return switch (tag) {
-                .linux, .freebsd => {
-                    assert(allocator != null);
-                    return if (allocator) |alloca| memfdBasedExists(alloca, path) else false;
-                },
-                .windows => windowsMapExists(path),
-                else => posixMapExists(path),
-            };
-        }
-
-        /// Closes and cleans up the shared memory segment.
-        ///
-        /// This function performs necessary cleanup operations for the shared memory segment:
-        /// - Unmaps the shared memory from the process's address space
-        /// - Closes the file descriptor or handle associated with the shared memory
-        /// - On some systems, it may also remove the shared memory object
-        ///
-        /// Args:
-        ///     self: Pointer to the Self instance to close.
-        ///
-        /// Note: After calling this function, the Self instance should no longer be used.
-        /// The shared memory segment may still exist in the system if other processes are using it.
-        pub fn close(self: *Self, allocator: ?std.mem.Allocator) void {
-            switch (tag) {
-                .linux, .freebsd => {
-                    assert(allocator != null);
-                    // if (self.allocator) |alloca| memfdBasedClose(alloca, self.ptr, self.handle, self.name);
-                    if (allocator) |alloca| {
-                        memfdBasedClose(alloca, self.ptr, self.handle, self.name);
-                    }
-                },
-                .windows => windowsClose(self.ptr, self.handle, self.name),
-                else => posixClose(self.ptr, self.handle, self.name),
-            }
-        }
-    };
-}
+// pub fn SharedMemory(comptime S: type) type {
+//     return struct {
+//         const Self = @This();
+//         const T = switch (@typeInfo(S)) {
+//             .pointer => |ptr| switch (ptr.size) {
+//                 .slice => S,
+//                 else => []S,
+//             },
+//             .array => *S,
+//             else => *S,
+//         };
+// 
+//         include_header: bool,
+//         handle: std.fs.File.Handle,
+//         name: []const u8,
+//         size: usize,
+//         ptr: ?[]u8,
+//         data: T,
+//         // allocator: ?std.mem.Allocator,
+// 
+//         pub const empty: Self = .{
+//             .include_header = false,
+//             .handle = undefined,
+//             .name = undefined,
+//             .size = 0,
+//             .ptr = null,
+//             .data = undefined,
+//         };
+// 
+//         pub const emptyWithHeader: Self = blk: {
+//             var new = Self.empty;
+//             new.include_header = true;
+//             break :blk new;
+//         };
+// 
+//         pub fn header(shared: Shared) *ShmHeader {
+//             const header_size = @sizeOf(ShmHeader);
+//             return @ptrCast(@alignCast(shared.data.ptr[0..header_size]));
+//         }
+// 
+//         pub fn init(name: []const u8, size: usize) !Self {}
+// 
+//         pub fn makeSharedMemory(name: []const u8, size: usize, allocator: ?std.mem.Allocator) !Shared {
+//             return switch (tag) {
+//                 .linux, .freebsd => blk: {
+//                     if (use_shm_funcs) {
+//                         break :blk try posixCreate(name, size);
+//                     }
+//                     assert(allocator != null);
+//                     if (allocator) |alloca| {
+//                         break :blk try memfdBasedCreate(alloca, name, size);
+//                     }
+//                     return error.NoAllocatorForMemfdMeta;
+//                 },
+//                 .windows => try windowsCreate(name, size),
+//                 else => try posixCreate(name, size),
+//             };
+//         }
+// 
+//         /// Creates a new shared memory segment with the given name and fixed size.
+//         ///
+//         /// This function creates a new shared memory segment that can be accessed by multiple processes.
+//         /// It allocates space for a header (ShmHeader) and the requested number of type T.
+//         ///
+//         /// Args:
+//         ///     name: The name of the shared memory segment. This should be unique across the system.
+//         ///     allocator: Optional allocator, this is a requirement for using memfd
+//         ///
+//         /// Returns:
+//         ///     A new Self instance representing the created shared memory. This includes:
+//         ///     - handle: The file handle for the shared memory.
+//         ///     - name: The name of the shared memory segment.
+//         ///     - size: The number of elements allocated.
+//         ///     - ptr: A pointer to the entire shared memory block.
+//         ///     - data: A slice of the shared memory containing only the data elements (excluding the header).
+//         ///
+//         /// Error: Returns an error if the shared memory creation fails. This can happen due to:
+//         ///     - Insufficient permissions
+//         ///     - Out of memory
+//         ///     - Name conflicts
+//         ///     - System-specific limitations
+//         pub fn create(name: []const u8, allocator: ?std.mem.Allocator) !Self {
+//             const size = @sizeOf(ShmHeader) + @sizeOf(S);
+//             const result = try makeSharedMemory(name, size, allocator);
+// 
+//             var header: *ShmHeader = header(result);
+// 
+//             header.size_bytes = size;
+//             header.total_elements = 1;
+// 
+//             const header_size = @sizeOf(ShmHeader);
+// 
+//             // @compileLog(T);
+//             // @compileLog(S);
+//             const data: T = @as(
+//                 *S,
+//                 @ptrCast(@alignCast(&result.data.ptr[header_size])),
+//             );
+// 
+//             return .{
+//                 .handle = result.fd,
+//                 .name = name,
+//                 .size = 1,
+//                 .ptr = result.data,
+//                 .data = data,
+//                 // .allocator = allocator,
+//             };
+//         }
+// 
+//         /// Creates a new shared memory segment with the given name and size.
+//         ///
+//         /// This function creates a new shared memory segment that can be accessed by multiple processes.
+//         /// It allocates space for a header (ShmHeader) and the requested number of elements of type T.
+//         ///
+//         /// Args:
+//         ///     name: The name of the shared memory segment. This should be unique across the system.
+//         ///     count: The number of elements of type T to allocate in the shared memory.
+//         ///     allocator: Optional allocator, this is a requirement for using memfd
+//         ///
+//         /// Returns:
+//         ///     A new Self instance representing the created shared memory. This includes:
+//         ///     - handle: The file handle for the shared memory.
+//         ///     - name: The name of the shared memory segment.
+//         ///     - size: The number of elements allocated.
+//         ///     - ptr: A pointer to the entire shared memory block.
+//         ///     - data: A slice of the shared memory containing only the data elements (excluding the header).
+//         ///
+//         /// Error: Returns an error if the shared memory creation fails. This can happen due to:
+//         ///     - Insufficient permissions
+//         ///     - Out of memory
+//         ///     - Name conflicts
+//         ///     - System-specific limitations
+//         pub fn createWithLength(name: []const u8, count: usize, allocator: ?std.mem.Allocator) !Self {
+//             //const size = count * @sizeOf(T);
+//             const size = @sizeOf(ShmHeader) + (count * @sizeOf(S));
+//             const result = try makeSharedMemory(name, size, allocator);
+// 
+//             var header: *ShmHeader = header(result);
+// 
+//             header.size_bytes = size;
+//             header.total_elements = count;
+// 
+//             const header_size = @sizeOf(ShmHeader);
+// 
+//             const data: T = switch (@typeInfo(S)) {
+//                 .pointer => |ptr| switch (ptr.size) {
+//                     .slice => @as(
+//                         [*]@typeInfo(S).pointer.child,
+//                         @ptrCast(@alignCast(&result.data.ptr[header_size])),
+//                     )[0..count],
+//                     else => @as([*]S, @ptrCast(@alignCast(&result.data.ptr[header_size])))[0..count],
+//                 },
+//                 else => unreachable,
+//             };
+// 
+//             return .{
+//                 .handle = result.fd,
+//                 .name = name,
+//                 .size = count,
+//                 .ptr = result.data,
+//                 .data = data,
+//                 // .allocator = allocator,
+//             };
+//         }
+// 
+//         /// Opens an existing shared memory segment with the given name.
+//         ///
+//         /// This function attempts to open a previously created shared memory segment.
+//         /// It reads the header information to determine the size and layout of the shared memory.
+//         ///
+//         /// Args:
+//         ///     name: The name of the shared memory segment to open. This should match the name used in create().
+//         ///     allocator: Optional allocator, this is a requirement for using memfd
+//         ///
+//         /// Returns:
+//         ///     A Self instance representing the opened shared memory. This includes:
+//         ///     - handle: The file handle for the shared memory.
+//         ///     - name: The name of the shared memory segment.
+//         ///     - size: The number of elements in the shared memory.
+//         ///     - ptr: A pointer to the entire shared memory block.
+//         ///     - data: A slice of the shared memory containing only the data elements (excluding the header).
+//         ///
+//         /// Error: Returns an error if the shared memory cannot be opened. This can happen due to:
+//         ///     - The shared memory segment does not exist
+//         ///     - Insufficient permissions
+//         ///     - System-specific errors in opening or mapping the shared memory
+//         pub fn open(name: []const u8, allocator: ?std.mem.Allocator) !Self {
+//             const result = switch (tag) {
+//                 .linux, .freebsd => blk: {
+//                     if (use_shm_funcs) {
+//                         break :blk try posixOpen(name);
+//                     }
+//                     assert(allocator != null);
+//                     // break :blk if (allocator) |alloca| try memfdBasedOpen(alloca, name);
+//                     if (allocator) |alloca| {
+//                         break :blk try memfdBasedOpen(alloca, name);
+//                     }
+//                     return error.NoAllocatorForMemfdMeta;
+//                 },
+//                 .windows => try windowsOpen(name),
+//                 else => try posixOpen(name),
+//             };
+// 
+//             const header_size = @sizeOf(ShmHeader);
+//             const header: *ShmHeader = @ptrCast(@alignCast(result.data.ptr[0..header_size]));
+// 
+//             const count = header.total_elements;
+// 
+//             const data: T = switch (@typeInfo(S)) {
+//                 .pointer => |ptr| switch (ptr.size) {
+//                     .slice => @as(
+//                         [*]@typeInfo(S).pointer.child,
+//                         @ptrCast(@alignCast(&result.data.ptr[header_size])),
+//                     )[0..count],
+//                     else => @compileError("here"),
+//                 },
+//                 .array => @as(
+//                     T,
+//                     @ptrCast(@alignCast(&result.data.ptr[header_size])),
+//                 ),
+//                 else => @as(
+//                     *S,
+//                     @ptrCast(@alignCast(&result.data.ptr[header_size])),
+//                 ),
+//             };
+// 
+//             return .{
+//                 .handle = result.fd,
+//                 .name = name,
+//                 .size = count,
+//                 .ptr = result.data,
+//                 .data = data,
+//                 // .allocator = allocator,
+//             };
+//         }
+// 
+//         /// Checks if a shared memory segment with the given name exists.
+//         ///
+//         /// This function attempts to detect whether a shared memory segment with the specified name
+//         /// is currently present in the system.
+//         ///
+//         /// Args:
+//         ///     path: The name or path of the shared memory segment to check. The exact format
+//         ///           may depend on the operating system and the method used to create the segment.
+//         ///
+//         ///     allocator: Optional allocator, this is a requirement for using memfd
+//         /// Returns:
+//         ///     true if the shared memory segment exists and is accessible, false otherwise.
+//         ///
+//         /// Note: This function does not throw errors. A false return could mean either that the
+//         /// segment doesn't exist or that there was an error checking for its existence.
+//         pub fn exists(path: []const u8, allocator: ?std.mem.Allocator) bool {
+//             return switch (tag) {
+//                 .linux, .freebsd => {
+//                     assert(allocator != null);
+//                     return if (allocator) |alloca| memfdBasedExists(alloca, path) else false;
+//                 },
+//                 .windows => windowsMapExists(path),
+//                 else => posixMapExists(path),
+//             };
+//         }
+// 
+//         /// Closes and cleans up the shared memory segment.
+//         ///
+//         /// This function performs necessary cleanup operations for the shared memory segment:
+//         /// - Unmaps the shared memory from the process's address space
+//         /// - Closes the file descriptor or handle associated with the shared memory
+//         /// - On some systems, it may also remove the shared memory object
+//         ///
+//         /// Args:
+//         ///     self: Pointer to the Self instance to close.
+//         ///
+//         /// Note: After calling this function, the Self instance should no longer be used.
+//         /// The shared memory segment may still exist in the system if other processes are using it.
+//         pub fn close(self: *Self, allocator: ?std.mem.Allocator) void {
+//             switch (tag) {
+//                 .linux, .freebsd => {
+//                     assert(allocator != null);
+//                     // if (self.allocator) |alloca| memfdBasedClose(alloca, self.ptr, self.handle, self.name);
+//                     if (allocator) |alloca| {
+//                         memfdBasedClose(alloca, self.ptr, self.handle, self.name);
+//                     }
+//                 },
+//                 .windows => windowsClose(self.ptr, self.handle, self.name),
+//                 else => posixClose(self.ptr, self.handle, self.name),
+//             }
+//         }
+//     };
+// }
 
 pub const Shared = struct {
     // data: []align(4096) u8,
@@ -1236,13 +1236,19 @@ pub const SHMBackend = struct {
 };
 
 pub const PosixBackend = struct {
+    const Self = @This();
 
-    pub const vtable: VTable = .{
-        .createRaw = create,
-        .openRaw = open,
-        .closeRaw = close,
-        .exists = exists,
-    };
+    pub fn backend(self: *Self) SHMBackend {
+        return .{
+            .ptr = self,
+            .vtable = .{
+                .createRaw = create,
+                .openRaw = open,
+                .closeRaw = close,
+                .exists = exists,
+            },
+        };
+    }
 
     fn create(context: *anyopaque, name: []const u8, size: usize) !RawMapping {
         _ = context;
@@ -1300,12 +1306,12 @@ pub const PosixBackend = struct {
     fn open(context: *anyopaque, name: []const u8) !RawMapping {
         _ = context;
         assert(exists(name) == true);
-    
+
         const permissions: std.posix.mode_t = 0o666;
         const flags: std.posix.O = .{
             .ACCMODE = .RDWR,
         };
-    
+
         var buffer = [_]u8{0} ** std.fs.max_name_bytes;
         const name_z = try std.fmt.bufPrintZ(&buffer, "{s}", .{name});
         const fd = std.c.shm_open(name_z, @bitCast(flags), permissions);
@@ -1324,11 +1330,11 @@ pub const PosixBackend = struct {
                 else => return std.posix.unexpectedErrno(err),
             }
         }
-    
+
         const stat = try std.posix.fstat(fd);
-    
+
         const flags_protection: u32 = std.posix.PROT.READ | std.posix.PROT.WRITE;
-    
+
         const ptr = try std.posix.mmap(
             null,
             @intCast(stat.size),
@@ -1337,7 +1343,7 @@ pub const PosixBackend = struct {
             fd,
             0,
         );
-    
+
         return .{
             .data = ptr,
             .size = @intCast(stat.size),
@@ -1348,9 +1354,9 @@ pub const PosixBackend = struct {
     fn close(context: *anyopaque, mapping: RawMapping, name: []const u8) void {
         _ = context;
         std.posix.munmap(mapping.data.ptr);
-    
+
         std.posix.close(mapping.fd);
-    
+
         var buffer = [_]u8{0} ** std.fs.max_name_bytes;
         const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
         const rc = std.c.shm_unlink(name_z);
@@ -1371,42 +1377,47 @@ pub const PosixBackend = struct {
         assert(exists(name) == false);
     }
 
-
     fn exists(context: *anyopaque, name: []const u8) bool {
         _ = context;
         const flags: std.posix.O = .{
             .ACCMODE = .RDONLY,
         };
-    
+
         var buffer = [_]u8{0} ** std.fs.max_path_bytes;
         const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
-    
+
         const rc = std.c.shm_open(name_z, @bitCast(flags), 0o444);
-    
+
         if (rc >= 0) {
             return true;
         }
-    
+
         return false;
     }
 };
 
 pub const WindowsBackend = struct {
+    const Self = @This();
 
-    pub const vtable: VTable = .{
-        .createRaw = create,
-        .openRaw = open,
-        .closeRaw = close,
-        .exists = exists,
-    };
+    pub fn backend(self: *Self) SHMBackend {
+        return .{
+            .ptr = self,
+            .vtable = .{
+                .createRaw = create,
+                .openRaw = open,
+                .closeRaw = close,
+                .exists = exists,
+            },
+        };
+    }
 
-    fn create(context: *anyopaque,name: []const u8, size: usize) !RawMapping {
+    fn create(context: *anyopaque, name: []const u8, size: usize) !RawMapping {
         _ = context;
         assert(exists(name) == false);
-    
+
         var buffer = [_]u8{0} ** std.fs.max_name_bytes;
         const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
-    
+
         const handle_maybe: ?std.os.windows.HANDLE = winMem.CreateFileMappingA(
             windows.INVALID_HANDLE_VALUE,
             null,
@@ -1417,7 +1428,7 @@ pub const WindowsBackend = struct {
             @intCast(size),
             name_z,
         );
-    
+
         var handle: std.os.windows.HANDLE = std.os.windows.INVALID_HANDLE_VALUE;
         if (handle_maybe) |h| {
             handle = h;
@@ -1426,7 +1437,7 @@ pub const WindowsBackend = struct {
                 else => |err| return std.os.windows.unexpectedError(err),
             }
         }
-    
+
         const ptr_maybe = winMem.MapViewOfFile(
             handle,
             .{
@@ -1437,9 +1448,9 @@ pub const WindowsBackend = struct {
             0,
             size,
         );
-    
+
         var ptr: []align(4096) u8 = undefined;
-    
+
         if (ptr_maybe) |p| {
             ptr.ptr = @ptrCast(@alignCast(p));
             // ptr.len = size;
@@ -1448,9 +1459,9 @@ pub const WindowsBackend = struct {
                 else => |err| return std.os.windows.unexpectedError(err),
             }
         }
-    
+
         assert(exists(name) == true);
-    
+
         return .{
             .data = ptr[0..@as(usize, @intCast(size))],
             .size = size,
@@ -1461,21 +1472,21 @@ pub const WindowsBackend = struct {
     fn open(context: *anyopaque, name: []const u8) !RawMapping {
         _ = context;
         assert(exists(name) == true);
-    
+
         var buffer = [_]u8{0} ** std.fs.max_name_bytes;
         const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
-    
+
         const handle_flags: winMem.FILE_MAP = .{
             .READ = 1,
             .WRITE = 1,
         };
-    
+
         const handle_maybe = winMem.OpenFileMappingA(
             @bitCast(handle_flags),
             winZig.FALSE,
             name_z,
         );
-    
+
         var handle: std.os.windows.HANDLE = std.os.windows.INVALID_HANDLE_VALUE;
         if (handle_maybe) |h| {
             handle = h;
@@ -1484,7 +1495,7 @@ pub const WindowsBackend = struct {
                 else => |err| return std.os.windows.unexpectedError(err),
             }
         }
-    
+
         const ptr_maybe = winMem.MapViewOfFile(
             handle,
             .{
@@ -1495,10 +1506,10 @@ pub const WindowsBackend = struct {
             0,
             0,
         );
-    
+
         var size: usize = 0;
         var ptr: []u8 = undefined;
-    
+
         if (ptr_maybe) |p| {
             ptr.ptr = @ptrCast(@alignCast(p));
             const header: ShmHeader = @as(
@@ -1512,7 +1523,7 @@ pub const WindowsBackend = struct {
                 else => |err| return std.os.windows.unexpectedError(err),
             }
         }
-    
+
         return .{
             .data = ptr[0..@as(usize, @intCast(size))],
             .size = @intCast(size - 1),
@@ -1541,18 +1552,18 @@ pub const WindowsBackend = struct {
         _ = context;
         var buffer = [_]u8{0} ** std.fs.max_name_bytes;
         const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
-    
+
         const handle_flags: winMem.FILE_MAP = .{
             .READ = 1,
             .WRITE = 1,
         };
-    
+
         const handle = winMem.OpenFileMappingA(
             @bitCast(handle_flags),
             winZig.FALSE,
             name_z,
         );
-    
+
         if (handle) |h| {
             const file: std.fs.File = .{
                 .handle = h,
@@ -1560,7 +1571,84 @@ pub const WindowsBackend = struct {
             file.close();
             return true;
         }
-    
+
         return false;
     }
 };
+
+pub const DefaultBackend = switch (tag) {
+    .windows => WindowsBackend,
+    // .linux, .freebsd => if (use_shm_funcs) PosixBackend else MemfdBackend,
+    else => PosixBackend,
+};
+
+pub const SharedRegion = struct {
+    name: []const u8 = [_]u8{0} ** std.fs.max_name_bytes,
+    mapping: RawMapping,
+    meta_dir: std.fs.Dir,
+    backend: SHMBackend,
+
+    pub fn create(
+        name: []const u8,
+        size: usize,
+        meta_dir: std.fs.Dir,
+        backend: SHMBackend,
+    ) !SharedRegion {
+        const mapping = try backend.createRaw(name, size);
+        const result: SharedRegion = .{
+            .mapping = mapping,
+            .meta_dir = meta_dir,
+            .backend = backend,
+        };
+
+        @memcpy(result.name, name);
+
+        return result;
+    }
+
+    pub fn open(name: []const u8, meta_dir: std.fs.Dir, backend: SHMBackend) !SharedRegion {
+        const mapping = try backend.openRaw(name);
+        const result: SharedRegion = .{
+            .mapping = mapping,
+            .meta_dir = meta_dir,
+            .backend = backend,
+        };
+
+        @memcpy(result.name, name);
+
+        return result;
+    }
+
+    pub fn close(self: *SharedRegion) void {
+        self.backend.closeRaw(self.mapping, self.name);
+    }
+
+    pub fn exists(self: *SharedRegion) bool {
+        return self.backend.exists(self.name, self.mapping.size);
+    }
+
+    pub fn bytes(self: *SharedRegion) []u8 {
+        return self.mapping.data;
+    }
+};
+
+pub fn SharedMemory(comptime S: type) type {
+    return struct {
+        const Self = @This();
+        const T = switch (@typeInfo(S)) {
+            .pointer => |ptr| switch (ptr.size) {
+                .slice => S,
+                else => []S,
+            },
+            .array => *S,
+            else => *S,
+        };
+
+        region: SharedRegion,
+        data: T,
+
+        pub fn create(name: []const u8, meta_dir: std.fs.Dir, backed: SHMBackend) !Self {
+
+        }
+    };
+}
