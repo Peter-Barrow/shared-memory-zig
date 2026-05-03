@@ -42,7 +42,7 @@ const ShmHeader = struct {
 //             .array => *S,
 //             else => *S,
 //         };
-// 
+//
 //         include_header: bool,
 //         handle: std.fs.File.Handle,
 //         name: []const u8,
@@ -50,7 +50,7 @@ const ShmHeader = struct {
 //         ptr: ?[]u8,
 //         data: T,
 //         // allocator: ?std.mem.Allocator,
-// 
+//
 //         pub const empty: Self = .{
 //             .include_header = false,
 //             .handle = undefined,
@@ -59,20 +59,20 @@ const ShmHeader = struct {
 //             .ptr = null,
 //             .data = undefined,
 //         };
-// 
+//
 //         pub const emptyWithHeader: Self = blk: {
 //             var new = Self.empty;
 //             new.include_header = true;
 //             break :blk new;
 //         };
-// 
+//
 //         pub fn header(shared: Shared) *ShmHeader {
 //             const header_size = @sizeOf(ShmHeader);
 //             return @ptrCast(@alignCast(shared.data.ptr[0..header_size]));
 //         }
-// 
+//
 //         pub fn init(name: []const u8, size: usize) !Self {}
-// 
+//
 //         pub fn makeSharedMemory(name: []const u8, size: usize, allocator: ?std.mem.Allocator) !Shared {
 //             return switch (tag) {
 //                 .linux, .freebsd => blk: {
@@ -89,7 +89,7 @@ const ShmHeader = struct {
 //                 else => try posixCreate(name, size),
 //             };
 //         }
-// 
+//
 //         /// Creates a new shared memory segment with the given name and fixed size.
 //         ///
 //         /// This function creates a new shared memory segment that can be accessed by multiple processes.
@@ -115,21 +115,21 @@ const ShmHeader = struct {
 //         pub fn create(name: []const u8, allocator: ?std.mem.Allocator) !Self {
 //             const size = @sizeOf(ShmHeader) + @sizeOf(S);
 //             const result = try makeSharedMemory(name, size, allocator);
-// 
+//
 //             var header: *ShmHeader = header(result);
-// 
+//
 //             header.size_bytes = size;
 //             header.total_elements = 1;
-// 
+//
 //             const header_size = @sizeOf(ShmHeader);
-// 
+//
 //             // @compileLog(T);
 //             // @compileLog(S);
 //             const data: T = @as(
 //                 *S,
 //                 @ptrCast(@alignCast(&result.data.ptr[header_size])),
 //             );
-// 
+//
 //             return .{
 //                 .handle = result.fd,
 //                 .name = name,
@@ -139,7 +139,7 @@ const ShmHeader = struct {
 //                 // .allocator = allocator,
 //             };
 //         }
-// 
+//
 //         /// Creates a new shared memory segment with the given name and size.
 //         ///
 //         /// This function creates a new shared memory segment that can be accessed by multiple processes.
@@ -167,14 +167,14 @@ const ShmHeader = struct {
 //             //const size = count * @sizeOf(T);
 //             const size = @sizeOf(ShmHeader) + (count * @sizeOf(S));
 //             const result = try makeSharedMemory(name, size, allocator);
-// 
+//
 //             var header: *ShmHeader = header(result);
-// 
+//
 //             header.size_bytes = size;
 //             header.total_elements = count;
-// 
+//
 //             const header_size = @sizeOf(ShmHeader);
-// 
+//
 //             const data: T = switch (@typeInfo(S)) {
 //                 .pointer => |ptr| switch (ptr.size) {
 //                     .slice => @as(
@@ -185,7 +185,7 @@ const ShmHeader = struct {
 //                 },
 //                 else => unreachable,
 //             };
-// 
+//
 //             return .{
 //                 .handle = result.fd,
 //                 .name = name,
@@ -195,7 +195,7 @@ const ShmHeader = struct {
 //                 // .allocator = allocator,
 //             };
 //         }
-// 
+//
 //         /// Opens an existing shared memory segment with the given name.
 //         ///
 //         /// This function attempts to open a previously created shared memory segment.
@@ -233,12 +233,12 @@ const ShmHeader = struct {
 //                 .windows => try windowsOpen(name),
 //                 else => try posixOpen(name),
 //             };
-// 
+//
 //             const header_size = @sizeOf(ShmHeader);
 //             const header: *ShmHeader = @ptrCast(@alignCast(result.data.ptr[0..header_size]));
-// 
+//
 //             const count = header.total_elements;
-// 
+//
 //             const data: T = switch (@typeInfo(S)) {
 //                 .pointer => |ptr| switch (ptr.size) {
 //                     .slice => @as(
@@ -256,7 +256,7 @@ const ShmHeader = struct {
 //                     @ptrCast(@alignCast(&result.data.ptr[header_size])),
 //                 ),
 //             };
-// 
+//
 //             return .{
 //                 .handle = result.fd,
 //                 .name = name,
@@ -266,7 +266,7 @@ const ShmHeader = struct {
 //                 // .allocator = allocator,
 //             };
 //         }
-// 
+//
 //         /// Checks if a shared memory segment with the given name exists.
 //         ///
 //         /// This function attempts to detect whether a shared memory segment with the specified name
@@ -292,7 +292,7 @@ const ShmHeader = struct {
 //                 else => posixMapExists(path),
 //             };
 //         }
-// 
+//
 //         /// Closes and cleans up the shared memory segment.
 //         ///
 //         /// This function performs necessary cleanup operations for the shared memory segment:
@@ -1647,8 +1647,57 @@ pub fn SharedMemory(comptime S: type) type {
         region: SharedRegion,
         data: T,
 
-        pub fn create(name: []const u8, meta_dir: std.fs.Dir, backed: SHMBackend) !Self {
+        pub fn create(name: []const u8, meta_dir: std.fs.Dir, backend: SHMBackend) !Self {
+            const shared_region = try SharedRegion.create(
+                name,
+                @sizeOf(S),
+                meta_dir,
+                backend,
+            );
 
+            const data: T = @ptrCast(@alignCast(shared_region.bytes()));
+
+            return .{
+                .region = shared_region,
+                .data = data,
+            };
+        }
+
+        pub fn createCapacity(name: []const u8, count: usize, meta_dir: std.fs.Dir, backend: SHMBackend) !Self {
+            const size = @sizeOf(S) * count;
+            const shared_region = try SharedRegion.create(
+                name,
+                size,
+                meta_dir,
+                backend,
+            );
+
+            const data: T = @ptrCast(@alignCast(shared_region.bytes()));
+
+            return .{
+                .region = shared_region,
+                .data = data,
+            };
+        }
+
+        pub fn open(name: []const u8, meta_dir: std.fs.Dir, backend: SHMBackend) !Self {
+            const shared_region = try SharedRegion.open(
+                name,
+                meta_dir,
+                backend,
+            );
+
+            const data: T = @ptrCast(@alignCast(shared_region.bytes()));
+
+            return .{
+                .region = shared_region,
+                .data = data,
+            };
+        }
+
+        pub fn close(self: *Self) void {
+            self.region.close();
+            self.data = undefined;
         }
     };
 }
