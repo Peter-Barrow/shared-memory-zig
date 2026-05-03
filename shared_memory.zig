@@ -34,7 +34,6 @@ const ShmHeader = struct {
 pub fn SharedMemory(comptime S: type) type {
     return struct {
         const Self = @This();
-        // const T = if (@typeInfo(S) == .pointer) []S else *S;
         const T = switch (@typeInfo(S)) {
             .pointer => |ptr| switch (ptr.size) {
                 .slice => S,
@@ -44,17 +43,35 @@ pub fn SharedMemory(comptime S: type) type {
             else => *S,
         };
 
+        include_header: bool,
         handle: std.fs.File.Handle,
         name: []const u8,
         size: usize,
         ptr: ?[]u8,
         data: T,
-        allocator: ?std.mem.Allocator,
+        // allocator: ?std.mem.Allocator,
 
-        pub fn extractHeader(shared: Shared) *ShmHeader {
+        pub const empty: Self = .{
+            .include_header = false,
+            .handle = undefined,
+            .name = undefined,
+            .size = 0,
+            .ptr = null,
+            .data = undefined,
+        };
+
+        pub const emptyWithHeader: Self = blk: {
+            var new = Self.empty;
+            new.include_header = true;
+            break :blk new;
+        };
+
+        pub fn header(shared: Shared) *ShmHeader {
             const header_size = @sizeOf(ShmHeader);
             return @ptrCast(@alignCast(shared.data.ptr[0..header_size]));
         }
+
+        pub fn init(name: []const u8, size: usize) !Self {}
 
         pub fn makeSharedMemory(name: []const u8, size: usize, allocator: ?std.mem.Allocator) !Shared {
             return switch (tag) {
@@ -99,7 +116,7 @@ pub fn SharedMemory(comptime S: type) type {
             const size = @sizeOf(ShmHeader) + @sizeOf(S);
             const result = try makeSharedMemory(name, size, allocator);
 
-            var header: *ShmHeader = extractHeader(result);
+            var header: *ShmHeader = header(result);
 
             header.size_bytes = size;
             header.total_elements = 1;
@@ -119,7 +136,7 @@ pub fn SharedMemory(comptime S: type) type {
                 .size = 1,
                 .ptr = result.data,
                 .data = data,
-                .allocator = allocator,
+                // .allocator = allocator,
             };
         }
 
@@ -151,7 +168,7 @@ pub fn SharedMemory(comptime S: type) type {
             const size = @sizeOf(ShmHeader) + (count * @sizeOf(S));
             const result = try makeSharedMemory(name, size, allocator);
 
-            var header: *ShmHeader = extractHeader(result);
+            var header: *ShmHeader = header(result);
 
             header.size_bytes = size;
             header.total_elements = count;
@@ -175,7 +192,7 @@ pub fn SharedMemory(comptime S: type) type {
                 .size = count,
                 .ptr = result.data,
                 .data = data,
-                .allocator = allocator,
+                // .allocator = allocator,
             };
         }
 
@@ -246,7 +263,7 @@ pub fn SharedMemory(comptime S: type) type {
                 .size = count,
                 .ptr = result.data,
                 .data = data,
-                .allocator = allocator,
+                // .allocator = allocator,
             };
         }
 
@@ -288,12 +305,12 @@ pub fn SharedMemory(comptime S: type) type {
         ///
         /// Note: After calling this function, the Self instance should no longer be used.
         /// The shared memory segment may still exist in the system if other processes are using it.
-        pub fn close(self: *Self) void {
+        pub fn close(self: *Self, allocator: ?std.mem.Allocator) void {
             switch (tag) {
                 .linux, .freebsd => {
-                    assert(self.allocator != null);
+                    assert(allocator != null);
                     // if (self.allocator) |alloca| memfdBasedClose(alloca, self.ptr, self.handle, self.name);
-                    if (self.allocator) |alloca| {
+                    if (allocator) |alloca| {
                         memfdBasedClose(alloca, self.ptr, self.handle, self.name);
                     }
                 },
@@ -337,53 +354,62 @@ pub const XdgMemfdMeta = struct {
     fd: std.fs.File.Handle,
     size: usize,
     timestamp: i64,
+
+    pub fn init(size: usize, fd: std.fs.File.Handle) XdgMemfdMeta {
+        return .{
+            .pid = switch (tag) {
+                .linux => std.os.linux.getpid(),
+                else => std.c.getpid(),
+            },
+            .fd = fd,
+            .size = size,
+            .timestamp = std.time.timestamp(),
+        };
+    }
+
+    pub fn initFromAbsolutePath(absolute_path: []const u8) !XdgMemfdMeta {
+        const file = try std.fs.openFileAbsolute(
+            absolute_path,
+            .{},
+        );
+        defer file.close();
+
+        var meta: XdgMemfdMeta = undefined;
+        const bytes_read = try file.readAll(std.mem.asBytes(&meta));
+        if (bytes_read != @sizeOf(XdgMemfdMeta)) return error.IncorrectSize;
+
+        // If process no longer exists, clean up file
+        std.posix.kill(meta.pid, 0) catch {
+            // we know the process no longer exists so delete the meta file
+            try std.fs.deleteFileAbsolute(absolute_path);
+        };
+
+        return meta;
+    }
+
+    pub fn write(
+        self: *XdgMemfdMeta,
+        absolute_path: []const u8,
+    ) void {
+        const file = try std.fs.createFileAbsolute(
+            absolute_path,
+            .{
+                .read = true,
+                .truncate = true,
+            },
+        );
+        defer file.close();
+
+        try file.writeAll(std.mem.asBytes(self));
+    }
+
+    /// Deletes the metadata file for a memfd if it exists
+    /// Does nothing if the file doesn't exist or can't be deleted
+    pub fn deinit(self: *XdgMemfdMeta, absolute_path: []const u8) void {
+        _ = self;
+        std.fs.deleteFileAbsolute(absolute_path) catch return;
+    }
 };
-
-/// Writes metadata about a memfd file to disk
-/// The metadata is stored in the XDG runtime directory
-pub fn writeMemfdMeta(allocator: std.mem.Allocator, name: []const u8, meta: XdgMemfdMeta) !void {
-    const meta_path = try xgdRunTimePath(allocator, name);
-    defer allocator.free(meta_path);
-
-    const file = try std.fs.createFileAbsolute(meta_path, .{
-        .read = true,
-        .truncate = true,
-    });
-    defer file.close();
-
-    try file.writeAll(std.mem.asBytes(&meta));
-}
-
-/// Reads metadata about a memfd file from disk
-/// If the process that created the memfd no longer exists, the metadata file is deleted
-/// Returns error.IncorrectSize if the metadata file is corrupted
-pub fn readMemfdMeta(allocator: std.mem.Allocator, name: []const u8) !XdgMemfdMeta {
-    const meta_path = try xgdRunTimePath(allocator, name);
-    defer allocator.free(meta_path);
-
-    const file = try std.fs.openFileAbsolute(meta_path, .{});
-    defer file.close();
-
-    var meta: XdgMemfdMeta = undefined;
-    const bytes_read = try file.readAll(std.mem.asBytes(&meta));
-    if (bytes_read != @sizeOf(XdgMemfdMeta)) return error.IncorrectSize;
-
-    // If process no longer exists, clean up file
-    std.posix.kill(meta.pid, 0) catch {
-        // we know the process no longer exists so delete the meta file
-        try std.fs.deleteFileAbsolute(meta_path);
-    };
-
-    return meta;
-}
-
-/// Deletes the metadata file for a memfd if it exists
-/// Does nothing if the file doesn't exist or can't be deleted
-pub fn deleteMemfdMeta(allocator: std.mem.Allocator, name: []const u8) void {
-    const meta_path = xgdRunTimePath(allocator, name) catch return;
-    defer allocator.free(meta_path);
-    std.fs.deleteFileAbsolute(meta_path) catch return;
-}
 
 /// Creates a shared memory segment using memfd on Linux and FreeBSD.
 ///
@@ -407,7 +433,7 @@ pub fn deleteMemfdMeta(allocator: std.mem.Allocator, name: []const u8) void {
 ///     - memfd_create failure
 ///     - ftruncate failure
 ///     - mmap failure
-pub fn memfdBasedCreate(allocator: std.mem.Allocator, name: []const u8, size: usize) !Shared {
+pub fn memfdBasedCreate(meta_data_path: []const u8, name: []const u8, size: usize) !Shared {
     const n = if (fileNameStartsWithSlash(name)) name else name[1..name.len];
     // std.debug.print("name (n):\t{s}\n", .{n});
     const fd = try std.posix.memfd_create(n, 0);
@@ -432,16 +458,19 @@ pub fn memfdBasedCreate(allocator: std.mem.Allocator, name: []const u8, size: us
     // const path = std.fmt.bufPrintZ(&buffer, "/proc/{d}/fd/{d}", .{ pid, fd }) catch unreachable;
     // assert(memfdBasedExists(allocator, path) == true);
 
-    try writeMemfdMeta(
-        allocator,
-        n,
-        .{
-            .pid = pid,
-            .fd = fd,
-            .size = size,
-            .timestamp = std.time.timestamp(),
-        },
-    );
+    // try writeMemfdMeta(
+    //     allocator,
+    //     n,
+    //     .{
+    //         .pid = pid,
+    //         .fd = fd,
+    //         .size = size,
+    //         .timestamp = std.time.timestamp(),
+    //     },
+    // );
+
+    const meta = XdgMemfdMeta.init(size, fd);
+    meta.write(absolute_path);
 
     return .{
         .data = ptr,
@@ -574,7 +603,7 @@ pub fn memfdBasedClose(
 ///     - shm_open failure
 ///     - ftruncate failure
 ///     - mmap failure
-pub fn posixCreate(name: []const u8, size: usize) !Shared {
+pub fn posixCreate(name: []const u9, size: usize) !Shared {
     assert(posixMapExists(name) == false);
 
     const permissions: std.posix.mode_t = 0o666;
@@ -829,7 +858,7 @@ pub fn windowsCreate(name: []const u8, size: usize) !Shared {
     var ptr: []align(4096) u8 = undefined;
 
     if (ptr_maybe) |p| {
-        ptr.ptr = @alignCast(@ptrCast(p));
+        ptr.ptr = @ptrCast(@alignCast(p));
         // ptr.len = size;
     } else {
         switch (std.os.windows.kernel32.GetLastError()) {
@@ -904,7 +933,7 @@ pub fn windowsOpen(name: []const u8) !Shared {
     var ptr: []u8 = undefined;
 
     if (ptr_maybe) |p| {
-        ptr.ptr = @alignCast(@ptrCast(p));
+        ptr.ptr = @ptrCast(@alignCast(p));
         const header: ShmHeader = @as(
             *ShmHeader,
             @ptrCast(@alignCast(ptr.ptr[0..@sizeOf(ShmHeader)])),
@@ -1170,3 +1199,194 @@ test "SharedMemory - Structure with String" {
     try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.float, 0.001);
     try std.testing.expectEqualStrings("Hello, SHM!", std.mem.sliceTo(&shm2.data.string, 0));
 }
+
+pub const RawMapping = struct {
+    data: []u8,
+    size: usize,
+    fd: std.fs.File.Handle,
+    pid: ?pid_t = null,
+};
+
+pub const VTable = struct {
+    createRaw: *const fn (ptr: *anyopaque, name: []const u8, size: usize) anyerror!RawMapping,
+    openRaw: *const fn (ptr: *anyopaque, name: []const u8, size: usize) anyerror!RawMapping,
+    closeRaw: *const fn (ptr: *anyopaque, mapping: RawMapping, name: []const u8) void,
+    exists: *const fn (ptr: *anyopaque, name: []const u8, size: usize) bool,
+};
+
+pub const SHMBackend = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub fn createRaw(self: SHMBackend, name: []const u8, size: usize) !RawMapping {
+        return try self.vtable.createRaw(self.ptr, name, size);
+    }
+
+    pub fn openRaw(self: SHMBackend, name: []const u8, size: usize) !RawMapping {
+        return try self.vtable.openRaw(self.ptr, name, size);
+    }
+
+    pub fn closeRaw(self: SHMBackend, mapping: RawMapping, name: []const u8) void {
+        try self.vtable.closeRaw(self.ptr, mapping, name);
+    }
+
+    pub fn exists(self: SHMBackend, name: []const u8, size: usize) bool {
+        return self.vtable.exists(self.ptr, name, size);
+    }
+};
+
+pub const PosixBackend = struct {
+
+    pub const vtable: VTable = .{
+        .createRaw = create,
+        .openRaw = open,
+        .closeRaw = close,
+        .exists = exists,
+    };
+
+    fn create(context: *anyopaque, name: []const u8, size: usize) !RawMapping {
+        _ = context;
+        assert(exists(name) == true);
+
+        const permissions: std.posix.mode_t = 0o666;
+        const flags: std.posix.O = .{
+            .ACCMODE = .RDWR,
+            .CREAT = true,
+            .EXCL = true,
+        };
+
+        var buffer = [_]u8{0} ** std.fs.max_name_bytes;
+        const name_z = try std.fmt.bufPrintZ(&buffer, "{s}", .{name});
+        const fd = std.c.shm_open(name_z, @bitCast(flags), permissions);
+
+        if (fd == -1) {
+            const err_no: u32 = @bitCast(std.c._errno().*);
+            const err: std.posix.E = @enumFromInt(err_no);
+            switch (err) {
+                .SUCCESS => @panic("Success"),
+                .ACCES => return error.AccessDenied,
+                .EXIST => return error.PathAlreadyExists,
+                .INVAL => unreachable,
+                .MFILE => return error.ProcessFdQuotaExceeded,
+                .NAMETOOLONG => return error.NameTooLong,
+                .NFILE => return error.SystemFdQuotaExceeded,
+                .NOENT => return error.FileNotFound,
+                else => return std.posix.unexpectedErrno(err),
+            }
+        }
+
+        try std.posix.ftruncate(fd, @intCast(size));
+
+        const flags_protection: u32 = std.posix.PROT.READ | std.posix.PROT.WRITE;
+
+        const ptr = try std.posix.mmap(
+            null,
+            @intCast(size),
+            flags_protection,
+            .{ .TYPE = .SHARED },
+            fd,
+            0,
+        );
+
+        assert(exists(name) == true);
+
+        return .{
+            .data = ptr,
+            .size = size,
+            .fd = fd,
+        };
+    }
+
+    fn open(context: *anyopaque, name: []const u8) !RawMapping {
+        _ = context;
+        assert(exists(name) == true);
+    
+        const permissions: std.posix.mode_t = 0o666;
+        const flags: std.posix.O = .{
+            .ACCMODE = .RDWR,
+        };
+    
+        var buffer = [_]u8{0} ** std.fs.max_name_bytes;
+        const name_z = try std.fmt.bufPrintZ(&buffer, "{s}", .{name});
+        const fd = std.c.shm_open(name_z, @bitCast(flags), permissions);
+        if (fd == -1) {
+            const err_no: u32 = @bitCast(std.c._errno().*);
+            const err: std.posix.E = @enumFromInt(err_no);
+            switch (err) {
+                .SUCCESS => @panic("Success"),
+                .ACCES => return error.AccessDenied,
+                .EXIST => return error.PathAlreadyExists,
+                .INVAL => unreachable,
+                .MFILE => return error.ProcessFdQuotaExceeded,
+                .NAMETOOLONG => return error.NameTooLong,
+                .NFILE => return error.SystemFdQuotaExceeded,
+                .NOENT => return error.FileNotFound,
+                else => return std.posix.unexpectedErrno(err),
+            }
+        }
+    
+        const stat = try std.posix.fstat(fd);
+    
+        const flags_protection: u32 = std.posix.PROT.READ | std.posix.PROT.WRITE;
+    
+        const ptr = try std.posix.mmap(
+            null,
+            @intCast(stat.size),
+            flags_protection,
+            .{ .TYPE = .SHARED },
+            fd,
+            0,
+        );
+    
+        return .{
+            .data = ptr,
+            .size = @intCast(stat.size),
+            .fd = fd,
+        };
+    }
+
+    fn close(context: *anyopaque, mapping: RawMapping, name: []const u8) void {
+        _ = context;
+        std.posix.munmap(mapping.data.ptr);
+    
+        std.posix.close(mapping.fd);
+    
+        var buffer = [_]u8{0} ** std.fs.max_name_bytes;
+        const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
+        const rc = std.c.shm_unlink(name_z);
+        _ = rc;
+        // if (rc == -1) {
+        //     const err_no = std.c._errno().*;
+        //     const err: std.posix.E = @enumFromInt(err_no);
+        //     switch (err) {
+        //         .SUCCESS => return,
+        //         .ACCES => return error.AccessDenied,
+        //         .PERM => return error.AccessDenied,
+        //         .INVAL => unreachable,
+        //         .NAMETOOLONG => return error.NameTooLong,
+        //         .NOENT => return, //return error.FileNotFound,
+        //         else => return std.posix.unexpectedErrno(err),
+        //     }
+        // }
+        assert(exists(name) == false);
+    }
+
+
+    fn exists(context: *anyopaque, name: []const u8) bool {
+        _ = context;
+        const flags: std.posix.O = .{
+            .ACCMODE = .RDONLY,
+        };
+    
+        var buffer = [_]u8{0} ** std.fs.max_path_bytes;
+        const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
+    
+        const rc = std.c.shm_open(name_z, @bitCast(flags), 0o444);
+    
+        if (rc >= 0) {
+            return true;
+        }
+    
+        return false;
+    }
+};
