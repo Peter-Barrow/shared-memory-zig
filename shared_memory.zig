@@ -39,8 +39,8 @@ const ShmHeader = struct {
 //     pid: ?pid_t = null,
 // };
 
-fn fileNameStartsWithSlash(name: []const u8) bool {
-    return std.mem.count(u8, name, "/") == 0;
+fn hasLeadingSlash(name: []const u8) bool {
+    return name.len > 0 and name[0] == '/';
 }
 
 /// Returns the XDG runtime path for a memfd metadata file with the given name
@@ -92,6 +92,7 @@ pub const XdgMemfdMeta = struct {
         std.posix.kill(meta.pid, 0) catch {
             // we know the process no longer exists so delete the meta file
             try std.fs.deleteFileAbsolute(absolute_path);
+            return error.MetaDoesNotExist;
         };
 
         return meta;
@@ -121,30 +122,8 @@ pub const XdgMemfdMeta = struct {
     }
 };
 
-/// Creates a shared memory segment using memfd on Linux and FreeBSD.
-///
-/// This function creates an anonymous file using memfd_create and maps it into memory.
-/// The resulting shared memory can be accessed by child processes or other processes
-/// that know the file descriptor.
-///
-/// Args:
-///     name: The name of the shared memory segment. This is used for debugging purposes
-///           and may appear in /proc/self/fd/.
-///     size: The size of the shared memory segment in bytes.
-///
-/// Returns:
-///     A Shared struct representing the created shared memory, containing:
-///     - data: A slice of the mapped memory
-///     - size: The size of the shared memory
-///     - fd: The file descriptor of the memfd
-///     - pid: The process ID that created the memfd (optional)
-///
-/// Error: Returns an error if any step of the shared memory creation fails, including:
-///     - memfd_create failure
-///     - ftruncate failure
-///     - mmap failure
 pub fn memfdBasedCreate(meta_data_path: []const u8, name: []const u8, size: usize) !Shared {
-    const n = if (fileNameStartsWithSlash(name)) name else name[1..name.len];
+    const n = if (hasLeadingSlash(name)) name else name[1..name.len];
     // std.debug.print("name (n):\t{s}\n", .{n});
     const fd = try std.posix.memfd_create(n, 0);
 
@@ -190,95 +169,16 @@ pub fn memfdBasedCreate(meta_data_path: []const u8, name: []const u8, size: usiz
     };
 }
 
-/// Opens an existing memfd-based shared memory segment.
-///
-/// This function opens a previously created memfd-based shared memory segment
-/// using its file path. It's typically used to open a shared memory segment
-/// created by another process.
-///
-/// Args:
-///     name: The name (file path) of the shared memory segment to open.
-///           This should be the full path to the memfd file, typically
-///           in the format "/proc/<pid>/fd/<fd>".
-///
-/// Returns:
-///     A Shared struct representing the opened shared memory, containing:
-///     - data: A slice of the mapped memory
-///     - size: The size of the shared memory
-///     - fd: The file descriptor of the opened memfd
-///
-/// Error: Returns an error if the shared memory cannot be opened, including:
-///     - File open failure
-///     - fstat failure
-///     - mmap failure
-pub fn memfdBasedOpen(allocator: std.mem.Allocator, name: []const u8) !Shared {
 
-    // const meta = try readMemfdMeta(allocator, name) catch return error.SharedMemoryNotFound;
-    const n = if (fileNameStartsWithSlash(name)) name else name[1..name.len];
-    const meta = try readMemfdMeta(allocator, n);
-    var buffer = [_]u8{0} ** std.fs.max_path_bytes;
-    const path = try std.fmt.bufPrint(&buffer, "/proc/{d}/fd/{d}", .{ meta.pid, meta.fd });
-    // assert(memfdBasedExists(allocator, path) == true);
-    // std.debug.print("name to test existence:\t{s}\n", .{path});
-
-    const handle = try std.fs.openFileAbsolute(path, .{});
-    const fd = handle.handle;
-    const stat = try std.posix.fstat(fd);
-    const flags_protection: u32 = std.posix.PROT.READ;
-
-    const ptr = try std.posix.mmap(
-        null,
-        @intCast(stat.size),
-        flags_protection,
-        .{ .TYPE = .SHARED },
-        fd,
-        0,
-    );
-
-    return .{
-        .data = ptr,
-        .size = @intCast(stat.size),
-        .fd = fd,
-    };
-}
-
-/// Checks if a memfd-based shared memory segment exists.
-///
-/// This function attempts to open the file at the given path to determine
-/// if the memfd-based shared memory segment exists and is accessible.
-///
-/// Args:
-///     name: The name (file path) of the shared memory segment to check.
-///           This should be the full path to the memfd file, typically
-///           in the format "/proc/<pid>/fd/<fd>".
-///
-/// Returns:
-///     true if the shared memory segment exists and is accessible, false otherwise.
-///
-/// Note: This function does not throw errors. A false return could mean either that the
-/// segment doesn't exist or that there was an error checking for its existence.
-pub fn memfdBasedExists(allocator: std.mem.Allocator, name: []const u8) bool {
+pub memfdBasedExists(allocator: std.mem.Allocator, name: []const u8) bool {
     // std.debug.print("name to test existence:\t{s}\n", .{name});
-    const n = if (fileNameStartsWithSlash(name)) name[1..] else name;
+    const n = if (hasLeadingSlash(name)) name[1..] else name;
     const handle = std.fs.openFileAbsolute(n, .{}) catch return false;
     handle.close();
     _ = readMemfdMeta(allocator, name) catch return false;
     return true;
 }
 
-/// Closes and cleans up a memfd-based shared memory segment.
-///
-/// This function performs the necessary cleanup operations for a memfd-based shared memory:
-/// - Unmaps the shared memory from the process's address space (if a pointer is provided)
-/// - Closes the file descriptor associated with the memfd
-///
-/// Args:
-///     ptr: Optional pointer to the mapped memory. If provided, this memory will be unmapped.
-///     fd: File descriptor of the shared memory (memfd).
-///     name: Name of the shared memory segment. This is currently unused but kept for consistency.
-///
-/// Note: This function does not remove the memfd from the system. The memfd will be automatically
-/// cleaned up when all references to it are closed.
 pub fn memfdBasedClose(
     allocator: std.mem.Allocator,
     ptr: ?[]u8,
@@ -288,7 +188,7 @@ pub fn memfdBasedClose(
     // assert(existsMemfdBased(name) == true);
     if (ptr) |p| std.posix.munmap(@alignCast(p));
     std.posix.close(fd);
-    const n = if (fileNameStartsWithSlash(name)) name[1..] else name;
+    const n = if (hasLeadingSlash(name)) name[1..] else name;
     deleteMemfdMeta(allocator, n);
 
     // assert(memfdBasedExists(name) == false);
@@ -992,9 +892,199 @@ pub const WindowsBackend = struct {
     }
 };
 
+pub const MemfdBackend = struct {
+    const Self = @This();
+    meta_dir: std.fs.Dir,
+    allocator: std.mem.Allocator,
+
+    pub fn backend(self: *Self) SHMBackend {
+        return .{
+            .ptr = self,
+            .vtable = .{
+                .createRaw = create,
+                .openRaw = open,
+                .closeRaw = close,
+                .exists = exists,
+            },
+        };
+    }
+
+    /// Creates a shared memory segment using memfd on Linux and FreeBSD.
+    ///
+    /// This function creates an anonymous file using memfd_create and maps it into memory.
+    /// The resulting shared memory can be accessed by child processes or other processes
+    /// that know the file descriptor.
+    ///
+    /// Args:
+    ///     context: An opaque pointer to be case to "Self"
+    ///     name: The name of the shared memory segment. This is used for debugging purposes
+    ///           and may appear in /proc/self/fd/.
+    ///     size: The size of the shared memory segment in bytes.
+    ///
+    /// Returns:
+    ///     A RawMapping struct representing the created shared memory, containing:
+    ///     - data: A slice of the mapped memory
+    ///     - size: The size of the shared memory
+    ///     - fd: The file descriptor of the memfd
+    ///     - pid: The process ID that created the memfd (optional)
+    ///
+    /// Error: Returns an error if any step of the shared memory creation fails, including:
+    ///     - memfd_create failure
+    ///     - ftruncate failure
+    ///     - mmap failure
+    fn create(context: *anyopaque, name: []const u8, size: usize) !RawMapping {
+        _ = context;
+        const name_clean = if (hasLeadingSlash(name)) name[1..name.len] else name;
+
+        const fd = try std.posix.memfd_create(name_clean, 0);
+
+        try std.posix.ftruncate(fd, size);
+
+        const ptr = try std.posix.mmap(
+            null,
+            size,
+            @intCast(std.posix.PROT.READ | std.posix.PROT.WRITE),
+            .{ .TYPE = .SHARED },
+            fd,
+            0,
+        );
+
+        const pid: pid_t = switch (tag) {
+            .linux => std.os.linux.getpid(),
+            else => std.c.getpid(),
+        };
+
+        return .{
+            .data = ptr,
+            .size = size,
+            .fd = fd,
+            .pid = pid,
+        };
+    }
+
+    /// Opens an existing memfd-based shared memory segment.
+    ///
+    /// This function opens a previously created memfd-based shared memory segment
+    /// using its file path. It's typically used to open a shared memory segment
+    /// created by another process.
+    ///
+    /// Args:
+    ///     context: An opaque pointer to be case to "Self"
+    ///     name: The name (file path) of the shared memory segment to open.
+    ///           This should be the full path to the memfd file, typically
+    ///           in the format "/proc/<pid>/fd/<fd>".
+    ///
+    /// Returns:
+    ///     A RawMapping struct representing the opened shared memory, containing:
+    ///     - data: A slice of the mapped memory
+    ///     - size: The size of the shared memory
+    ///     - fd: The file descriptor of the opened memfd
+    ///
+    /// Error: Returns an error if the shared memory cannot be opened, including:
+    ///     - File open failure
+    ///     - fstat failure
+    ///     - mmap failure
+    fn open(context: *anyopaque, name: []const u8) !RawMapping {
+        const self: *@This() = @ptrCast(context);
+        const name_clean = if (hasLeadingSlash(name)) name[1..name.len] else name;
+
+        const path: []const u8 = try self.meta_dir.realpathAlloc(self.allocator, ".");
+        defer self.allocator.free(path);
+
+        const absolute_path = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/{s}",
+            .{ path, name_clean },
+        );
+        defer self.allocator.free(absolute_path);
+
+        const meta = try XdgMemfdMeta.initFromAbsolutePath(absolute_path);
+
+        const memfd_path = try std.fmt.allocPrint(
+            self.allocator,
+            "/proc/{d}/fd/{d}",
+            .{ meta.pid, meta.fd },
+        );
+        defer self.allocator.free(memfd_path);
+
+        const handle = try std.fs.openFileAbsolute(memfd_path, .{});
+        const fd = handle.handle;
+
+        const stat = try std.posix.fstat(fd);
+        const flags_protection: u32 = std.posix.PROT.READ;
+
+        const ptr = try std.posix.mmap(
+            null,
+            @intCast(stat.size),
+            flags_protection,
+            .{ .TYPE = .SHARED },
+            fd,
+            0,
+        );
+
+        return .{
+            .data = ptr,
+            .size = @intCast(stat.size),
+            .fd = fd,
+            .pid = meta.pid,
+        };
+    }
+
+    /// Closes and cleans up a memfd-based shared memory segment.
+    ///
+    /// This function performs the necessary cleanup operations for a memfd-based shared memory:
+    /// - Unmaps the shared memory from the process's address space (if a pointer is provided)
+    /// - Closes the file descriptor associated with the memfd
+    ///
+    /// Args:
+    ///     ptr: Optional pointer to the mapped memory. If provided, this memory will be unmapped.
+    ///     fd: File descriptor of the shared memory (memfd).
+    ///     name: Name of the shared memory segment. This is currently unused but kept for consistency.
+    ///
+    /// Note: This function does not remove the memfd from the system. The memfd will be automatically
+    /// cleaned up when all references to it are closed.
+    fn close(context: *anyopaque, mapping: RawMapping, name: []const u8) void {
+        const self: *@This() = @ptrCast(context);
+
+        if (!self.exists(name)) {
+            return;
+        }
+
+        std.posix.munmap(@alignCast(mapping.data));
+        std.posix.close(mapping.fd);
+        const meta_path = try xgdRunTimePath(self.allocator, name);
+        defer self.allocator.free(meta_path);
+        std.fs.deleteFileAbsolute(meta_path) catch return;
+    }
+
+    /// Checks if a memfd-based shared memory segment exists.
+    ///
+    /// This function attempts to open the file at the given path to determine
+    /// if the memfd-based shared memory segment exists and is accessible.
+    ///
+    /// Args:
+    ///     name: The name (file path) of the shared memory segment to check.
+    ///           This should be the full path to the memfd file, typically
+    ///           in the format "/proc/<pid>/fd/<fd>".
+    ///
+    /// Returns:
+    ///     true if the shared memory segment exists and is accessible, false otherwise.
+    ///
+    /// Note: This function does not throw errors. A false return could mean either that the
+    /// segment doesn't exist or that there was an error checking for its existence.
+    fn exists(context: *anyopaque, name: []const u8) bool {
+        const self: *@This() = @ptrCast(context);
+        const meta_path = try xgdRunTimePath(self.allocator, name);
+        try XdgMemfdMeta.initFromAbsolutePath(meta_path) catch |err| switch (err) {
+            .MetaDoesNotExist => return false,
+            => return true;
+        };
+    }
+};
+
 pub const DefaultBackend = switch (tag) {
     .windows => WindowsBackend,
-    // .linux, .freebsd => if (use_shm_funcs) PosixBackend else MemfdBackend,
+    .linux, .freebsd => if (use_shm_funcs) PosixBackend else MemfdBackend,
     else => PosixBackend,
 };
 
