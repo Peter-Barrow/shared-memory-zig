@@ -39,160 +39,6 @@ const ShmHeader = struct {
 //     pid: ?pid_t = null,
 // };
 
-fn hasLeadingSlash(name: []const u8) bool {
-    return name.len > 0 and name[0] == '/';
-}
-
-/// Returns the XDG runtime path for a memfd metadata file with the given name
-/// Caller owns returned memory
-fn xgdRunTimePath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    const runtime_dir = blk: {
-        const dir = try knownFolders.getPath(allocator, .runtime);
-        if (dir) |d| {
-            break :blk d;
-        }
-        return error.NoRuntimePathAvailable;
-    };
-    defer allocator.free(runtime_dir);
-
-    return std.fmt.allocPrint(allocator, "{s}/.memfd_{s}.meta", .{ runtime_dir, name });
-}
-
-/// Metadata about a memfd file that is stored on disk
-pub const XdgMemfdMeta = struct {
-    pid: pid_t,
-    fd: std.fs.File.Handle,
-    size: usize,
-    timestamp: i64,
-
-    pub fn init(size: usize, fd: std.fs.File.Handle) XdgMemfdMeta {
-        return .{
-            .pid = switch (tag) {
-                .linux => std.os.linux.getpid(),
-                else => std.c.getpid(),
-            },
-            .fd = fd,
-            .size = size,
-            .timestamp = std.time.timestamp(),
-        };
-    }
-
-    pub fn initFromAbsolutePath(absolute_path: []const u8) !XdgMemfdMeta {
-        const file = try std.fs.openFileAbsolute(
-            absolute_path,
-            .{},
-        );
-        defer file.close();
-
-        var meta: XdgMemfdMeta = undefined;
-        const bytes_read = try file.readAll(std.mem.asBytes(&meta));
-        if (bytes_read != @sizeOf(XdgMemfdMeta)) return error.IncorrectSize;
-
-        // If process no longer exists, clean up file
-        std.posix.kill(meta.pid, 0) catch {
-            // we know the process no longer exists so delete the meta file
-            try std.fs.deleteFileAbsolute(absolute_path);
-            return error.MetaDoesNotExist;
-        };
-
-        return meta;
-    }
-
-    pub fn write(
-        self: *XdgMemfdMeta,
-        absolute_path: []const u8,
-    ) void {
-        const file = try std.fs.createFileAbsolute(
-            absolute_path,
-            .{
-                .read = true,
-                .truncate = true,
-            },
-        );
-        defer file.close();
-
-        try file.writeAll(std.mem.asBytes(self));
-    }
-
-    /// Deletes the metadata file for a memfd if it exists
-    /// Does nothing if the file doesn't exist or can't be deleted
-    pub fn deinit(self: *XdgMemfdMeta, absolute_path: []const u8) void {
-        _ = self;
-        std.fs.deleteFileAbsolute(absolute_path) catch return;
-    }
-};
-
-pub fn memfdBasedCreate(meta_data_path: []const u8, name: []const u8, size: usize) !Shared {
-    const n = if (hasLeadingSlash(name)) name else name[1..name.len];
-    // std.debug.print("name (n):\t{s}\n", .{n});
-    const fd = try std.posix.memfd_create(n, 0);
-
-    try std.posix.ftruncate(fd, size);
-
-    const ptr = try std.posix.mmap(
-        null,
-        size,
-        @intCast(std.posix.PROT.READ | std.posix.PROT.WRITE),
-        .{ .TYPE = .SHARED },
-        fd,
-        0,
-    );
-
-    const pid: pid_t = switch (tag) {
-        .linux => std.os.linux.getpid(),
-        else => std.c.getpid(),
-    };
-
-    // var buffer = [_]u8{0} ** std.fs.MAX_NAME_BYTES;
-    // const path = std.fmt.bufPrintZ(&buffer, "/proc/{d}/fd/{d}", .{ pid, fd }) catch unreachable;
-    // assert(memfdBasedExists(allocator, path) == true);
-
-    // try writeMemfdMeta(
-    //     allocator,
-    //     n,
-    //     .{
-    //         .pid = pid,
-    //         .fd = fd,
-    //         .size = size,
-    //         .timestamp = std.time.timestamp(),
-    //     },
-    // );
-
-    const meta = XdgMemfdMeta.init(size, fd);
-    meta.write(absolute_path);
-
-    return .{
-        .data = ptr,
-        .size = size,
-        .fd = fd,
-        .pid = pid,
-    };
-}
-
-pub fn memfdBasedExists(allocator: std.mem.Allocator, name: []const u8) bool {
-    // std.debug.print("name to test existence:\t{s}\n", .{name});
-    const n = if (hasLeadingSlash(name)) name[1..] else name;
-    const handle = std.fs.openFileAbsolute(n, .{}) catch return false;
-    handle.close();
-    _ = readMemfdMeta(allocator, name) catch return false;
-    return true;
-}
-
-pub fn memfdBasedClose(
-    allocator: std.mem.Allocator,
-    ptr: ?[]u8,
-    fd: std.fs.File.Handle,
-    name: []const u8,
-) void {
-    // assert(existsMemfdBased(name) == true);
-    if (ptr) |p| std.posix.munmap(@alignCast(p));
-    std.posix.close(fd);
-    const n = if (hasLeadingSlash(name)) name[1..] else name;
-    deleteMemfdMeta(allocator, n);
-
-    // assert(memfdBasedExists(name) == false);
-}
-
 /// Forcibly closes a POSIX shared memory segment.
 ///
 /// Args:
@@ -202,186 +48,6 @@ pub fn posixForceClose(name: []const u8) void {
     const name_z = std.fmt.bufPrintZ(&buffer, "{s}", .{name}) catch unreachable;
     const rc = std.c.shm_unlink(name_z);
     _ = rc;
-}
-
-/// Generates a path string for a memory-mapped file descriptor.
-///
-/// This function creates a path string that represents the location of a memory-mapped
-/// file descriptor in the /proc filesystem. It's primarily used for Linux and similar
-/// systems that expose file descriptors through the /proc filesystem.
-///
-/// Args:
-///     buffer: A slice of u8 to store the generated path string.
-///     file_handle: The file handle of the memory-mapped file.
-///     pid: An optional process ID. If not provided, the current process ID is used.
-///
-/// Returns:
-///     A slice of u8 containing the generated path string.
-///
-/// Error: Returns an error if the path string cannot be formatted into the buffer.
-pub fn pathFromMemFdFile(buffer: []const u8, file_handle: std.fs.File, pid: ?u32) ![]const u8 {
-    const process_id = if (pid) |p| p else switch (tag) {
-        .linux => std.os.linux.getpid(),
-        .windows => 0,
-        else => std.c.getpid(),
-    };
-
-    const path = try std.fmt.bufPrint(&buffer, "/proc/{d}/fd/{d}", .{
-        process_id,
-        file_handle.handle,
-    });
-    return path;
-}
-
-test "SharedMemory - Single Struct" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloca = switch (tag) {
-        .linux, .freebsd => gpa.allocator(),
-        else => null,
-    };
-
-    const TestStruct = struct {
-        x: i32,
-        y: f64,
-    };
-    const SharedStruct = SharedMemory(TestStruct);
-
-    const shm_name = "/test_single_struct";
-
-    if (tag != .windows) {
-        if (use_shm_funcs) posixForceClose(shm_name);
-    }
-
-    var shm: SharedStruct = try SharedStruct.create(shm_name, alloca);
-    defer shm.close();
-
-    shm.data.* = .{ .x = 42, .y = 3.14 };
-
-    // Open the shared memory in another "process"
-    var shm2 = try SharedStruct.open(shm_name, alloca);
-    defer shm2.close();
-
-    try std.testing.expectEqual(@as(i32, 42), shm2.data.x);
-    try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.y, 0.001);
-}
-
-test "SharedMemory - Array Fixed Length" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloca = switch (tag) {
-        .linux, .freebsd => gpa.allocator(),
-        else => null,
-    };
-
-    const array_size = 20;
-    var expected = [_]i32{0} ** array_size;
-    for (0..array_size) |i| {
-        expected[i] = @intCast(i * 2);
-    }
-
-    const shm_name = "/test_array_fixed_length";
-
-    if (tag != .windows) {
-        if (use_shm_funcs) posixForceClose(shm_name);
-    }
-
-    const SharedI32 = SharedMemory([array_size]i32);
-
-    var shm: SharedI32 = try SharedI32.create(shm_name, alloca);
-    defer shm.close();
-
-    for (shm.data, 0..) |*item, i| {
-        item.* = @intCast(i * 2);
-    }
-
-    // Open the shared memory in another "process"
-    var shm2 = try SharedI32.open(shm_name, alloca);
-    defer shm2.close();
-
-    for (shm2.data, 0..) |item, i| {
-        try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
-        // std.debug.print("data @ idx:{d} -> {d}\n", .{ i, item });
-    }
-    try std.testing.expectEqualSlices(i32, &expected, shm2.data);
-}
-
-test "SharedMemory - Array Runtime Length" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloca = switch (tag) {
-        .linux, .freebsd => gpa.allocator(),
-        else => null,
-    };
-
-    const array_size = 20;
-    var expected = [_]i32{0} ** array_size;
-    for (0..array_size) |i| {
-        expected[i] = @intCast(i * 2);
-    }
-
-    const shm_name = "/test_array_runtime_length";
-
-    if (tag != .windows) {
-        if (use_shm_funcs) posixForceClose(shm_name);
-    }
-
-    const SharedI32 = SharedMemory([]i32);
-
-    var shm: SharedI32 = try SharedI32.createWithLength(shm_name, array_size, alloca);
-    defer shm.close();
-
-    for (shm.data, 0..) |*item, i| {
-        item.* = @intCast(i * 2);
-    }
-
-    // Open the shared memory in another "process"
-    var shm2 = try SharedI32.open(shm_name, alloca);
-    defer shm2.close();
-
-    for (shm2.data, 0..) |item, i| {
-        try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
-        // std.debug.print("data @ idx:{d} -> {d}\n", .{ i, item });
-    }
-    try std.testing.expectEqualSlices(i32, &expected, shm2.data);
-}
-
-test "SharedMemory - Structure with String" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloca = switch (tag) {
-        .linux, .freebsd => gpa.allocator(),
-        else => null,
-    };
-
-    const TestStruct = struct {
-        id: i32,
-        float: f64,
-        string: [20]u8,
-    };
-
-    const SharedTestStruct = SharedMemory(TestStruct);
-
-    const shm_name = "/test_struct_with_string";
-
-    if (tag != .windows) {
-        if (use_shm_funcs) posixForceClose(shm_name);
-    }
-
-    var shm = try SharedTestStruct.create(shm_name, alloca);
-    defer shm.close();
-
-    shm.data.id = 42;
-    shm.data.float = 3.14;
-    _ = std.fmt.bufPrint(&shm.data.string, "Hello, SHM!", .{}) catch unreachable;
-
-    // Open the shared memory in another "process"
-    var shm2 = try SharedTestStruct.open(shm_name, alloca);
-    defer shm2.close();
-
-    try std.testing.expectEqual(@as(i32, 42), shm2.data.id);
-    try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.float, 0.001);
-    try std.testing.expectEqualStrings("Hello, SHM!", std.mem.sliceTo(&shm2.data.string, 0));
 }
 
 pub const RawMapping = struct {
@@ -933,9 +599,8 @@ pub const MemfdBackend = struct {
     ///     - mmap failure
     fn create(context: *anyopaque, name: []const u8, size: usize) !RawMapping {
         _ = context;
-        const name_clean = if (hasLeadingSlash(name)) name[1..name.len] else name;
 
-        const fd = try std.posix.memfd_create(name_clean, 0);
+        const fd = try std.posix.memfd_create(name, 0);
 
         try std.posix.ftruncate(fd, size);
 
@@ -985,27 +650,19 @@ pub const MemfdBackend = struct {
     ///     - mmap failure
     fn open(context: *anyopaque, name: []const u8) !RawMapping {
         const self: *@This() = @ptrCast(context);
-        const name_clean = if (hasLeadingSlash(name)) name[1..name.len] else name;
 
-        const path: []const u8 = try self.meta_dir.realpathAlloc(self.allocator, ".");
-        defer self.allocator.free(path);
-
-        const absolute_path = try std.fmt.allocPrint(
+        const meta_data = try SharedMappingMeta.initFromFile(
+            self.meta_dir,
+            name,
             self.allocator,
-            "{s}/{s}",
-            .{ path, name_clean },
         );
-        defer self.allocator.free(absolute_path);
 
-        const meta = try XdgMemfdMeta.initFromAbsolutePath(absolute_path);
-
-        const memfd_path = try std.fmt.allocPrint(
-            self.allocator,
+        const memfd_path_buf: []const u8 = .{0} ** std.fs.max_path_bytes;
+        const memfd_path = try std.fmt.bufPrint(
+            &memfd_path_buf,
             "/proc/{d}/fd/{d}",
-            .{ meta.pid, meta.fd },
+            .{ meta_data.pid, meta_data.fd },
         );
-        defer self.allocator.free(memfd_path);
-
         const handle = try std.fs.openFileAbsolute(memfd_path, .{});
         const fd = handle.handle;
 
@@ -1025,7 +682,7 @@ pub const MemfdBackend = struct {
             .data = ptr,
             .size = @intCast(stat.size),
             .fd = fd,
-            .pid = meta.pid,
+            .pid = meta_data.pid,
         };
     }
 
@@ -1051,9 +708,9 @@ pub const MemfdBackend = struct {
 
         std.posix.munmap(@alignCast(mapping.data));
         std.posix.close(mapping.fd);
-        const meta_path = try xgdRunTimePath(self.allocator, name);
-        defer self.allocator.free(meta_path);
-        std.fs.deleteFileAbsolute(meta_path) catch return;
+        // const meta_path = try xgdRunTimePath(self.allocator, name);
+        // defer self.allocator.free(meta_path);
+        // std.fs.deleteFileAbsolute(meta_path) catch return;
     }
 
     /// Checks if a memfd-based shared memory segment exists.
@@ -1073,11 +730,19 @@ pub const MemfdBackend = struct {
     /// segment doesn't exist or that there was an error checking for its existence.
     fn exists(context: *anyopaque, name: []const u8) bool {
         const self: *@This() = @ptrCast(context);
-        const meta_path = try xgdRunTimePath(self.allocator, name);
-        try XdgMemfdMeta.initFromAbsolutePath(meta_path) catch |err| switch (err) {
-            .MetaDoesNotExist => return false,
-            else => return true,
-        };
+        // const meta_path = try xgdRunTimePath(self.allocator, name);
+        // try XdgMemfdMeta.initFromAbsolutePath(meta_path) catch |err| switch (err) {
+        //     .MetaDoesNotExist => return false,
+        //     else => return true,
+        // };
+
+        try SharedMappingMeta.initFromFile(
+            self.meta_dir,
+            name,
+            self.allocator,
+        ) catch return false;
+
+        return true;
     }
 };
 
@@ -1152,7 +817,10 @@ pub const SharedMappingMeta = struct {
         name: []const u8,
         allocator: std.mem.Allocator,
     ) !@This() {
-        const contents = meta_dir.readFileAlloc(allocator, name, 4096);
+        const buf: []const u8 = .{0} ** std.fs.max_path_bytes;
+        const file_name = try std.fmt.bufPrint(buf, "{s}-meta.json", .{name});
+
+        const contents = meta_dir.readFileAlloc(allocator, file_name, 4096);
         defer allocator.free(contents);
 
         const parsed = try std.json.parseFromSlice(
@@ -1182,8 +850,8 @@ pub const SharedMappingMeta = struct {
             },
         )});
 
-        const name_ext: []const u8 = .{0} ** std.fs.max_name_bytes;
-        try std.fmt.bufPrint(&name, "{s}-meta.json", .{name});
+        const name_buf: []const u8 = .{0} ** std.fs.max_name_bytes;
+        const name_ext = try std.fmt.bufPrint(&name_buf, "{s}-meta.json", .{name});
         const file = try meta_dir.createFile(name_ext, .{});
         defer file.close();
 
@@ -1309,4 +977,155 @@ pub fn SharedMemory(comptime S: type) type {
             self.data = undefined;
         }
     };
+}
+
+test "SharedMemory - Single Struct" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloca = switch (tag) {
+        .linux, .freebsd => gpa.allocator(),
+        else => null,
+    };
+
+    const TestStruct = struct {
+        x: i32,
+        y: f64,
+    };
+    const SharedStruct = SharedMemory(TestStruct);
+
+    const shm_name = "/test_single_struct";
+
+    if (tag != .windows) {
+        if (use_shm_funcs) posixForceClose(shm_name);
+    }
+
+    var shm: SharedStruct = try SharedStruct.create(shm_name, alloca);
+    defer shm.close();
+
+    shm.data.* = .{ .x = 42, .y = 3.14 };
+
+    // Open the shared memory in another "process"
+    var shm2 = try SharedStruct.open(shm_name, alloca);
+    defer shm2.close();
+
+    try std.testing.expectEqual(@as(i32, 42), shm2.data.x);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.y, 0.001);
+}
+
+test "SharedMemory - Array Fixed Length" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloca = switch (tag) {
+        .linux, .freebsd => gpa.allocator(),
+        else => null,
+    };
+
+    const array_size = 20;
+    var expected = [_]i32{0} ** array_size;
+    for (0..array_size) |i| {
+        expected[i] = @intCast(i * 2);
+    }
+
+    const shm_name = "/test_array_fixed_length";
+
+    if (tag != .windows) {
+        if (use_shm_funcs) posixForceClose(shm_name);
+    }
+
+    const SharedI32 = SharedMemory([array_size]i32);
+
+    var shm: SharedI32 = try SharedI32.create(shm_name, alloca);
+    defer shm.close();
+
+    for (shm.data, 0..) |*item, i| {
+        item.* = @intCast(i * 2);
+    }
+
+    // Open the shared memory in another "process"
+    var shm2 = try SharedI32.open(shm_name, alloca);
+    defer shm2.close();
+
+    for (shm2.data, 0..) |item, i| {
+        try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
+        // std.debug.print("data @ idx:{d} -> {d}\n", .{ i, item });
+    }
+    try std.testing.expectEqualSlices(i32, &expected, shm2.data);
+}
+
+test "SharedMemory - Array Runtime Length" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloca = switch (tag) {
+        .linux, .freebsd => gpa.allocator(),
+        else => null,
+    };
+
+    const array_size = 20;
+    var expected = [_]i32{0} ** array_size;
+    for (0..array_size) |i| {
+        expected[i] = @intCast(i * 2);
+    }
+
+    const shm_name = "/test_array_runtime_length";
+
+    if (tag != .windows) {
+        if (use_shm_funcs) posixForceClose(shm_name);
+    }
+
+    const SharedI32 = SharedMemory([]i32);
+
+    var shm: SharedI32 = try SharedI32.createWithLength(shm_name, array_size, alloca);
+    defer shm.close();
+
+    for (shm.data, 0..) |*item, i| {
+        item.* = @intCast(i * 2);
+    }
+
+    // Open the shared memory in another "process"
+    var shm2 = try SharedI32.open(shm_name, alloca);
+    defer shm2.close();
+
+    for (shm2.data, 0..) |item, i| {
+        try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
+        // std.debug.print("data @ idx:{d} -> {d}\n", .{ i, item });
+    }
+    try std.testing.expectEqualSlices(i32, &expected, shm2.data);
+}
+
+test "SharedMemory - Structure with String" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloca = switch (tag) {
+        .linux, .freebsd => gpa.allocator(),
+        else => null,
+    };
+
+    const TestStruct = struct {
+        id: i32,
+        float: f64,
+        string: [20]u8,
+    };
+
+    const SharedTestStruct = SharedMemory(TestStruct);
+
+    const shm_name = "/test_struct_with_string";
+
+    if (tag != .windows) {
+        if (use_shm_funcs) posixForceClose(shm_name);
+    }
+
+    var shm = try SharedTestStruct.create(shm_name, alloca);
+    defer shm.close();
+
+    shm.data.id = 42;
+    shm.data.float = 3.14;
+    _ = std.fmt.bufPrint(&shm.data.string, "Hello, SHM!", .{}) catch unreachable;
+
+    // Open the shared memory in another "process"
+    var shm2 = try SharedTestStruct.open(shm_name, alloca);
+    defer shm2.close();
+
+    try std.testing.expectEqual(@as(i32, 42), shm2.data.id);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.float, 0.001);
+    try std.testing.expectEqualStrings("Hello, SHM!", std.mem.sliceTo(&shm2.data.string, 0));
 }
