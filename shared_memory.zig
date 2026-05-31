@@ -980,13 +980,6 @@ pub fn SharedMemory(comptime S: type) type {
 }
 
 test "SharedMemory - Single Struct" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloca = switch (tag) {
-        .linux, .freebsd => gpa.allocator(),
-        else => null,
-    };
-
     const TestStruct = struct {
         x: i32,
         y: f64,
@@ -995,17 +988,21 @@ test "SharedMemory - Single Struct" {
 
     const shm_name = "/test_single_struct";
 
-    if (tag != .windows) {
-        if (use_shm_funcs) posixForceClose(shm_name);
-    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    var shm: SharedStruct = try SharedStruct.create(shm_name, alloca);
+    if (use_shm_funcs) posixForceClose(shm_name);
+
+    var b: DefaultBackend = .{};
+    const backend = b.backend();
+
+    var shm: SharedStruct = try SharedStruct.create(shm_name, tmp.dir, backend);
     defer shm.close();
 
     shm.data.* = .{ .x = 42, .y = 3.14 };
 
     // Open the shared memory in another "process"
-    var shm2 = try SharedStruct.open(shm_name, alloca);
+    var shm2 = try SharedStruct.open(shm_name, tmp.dir, backend);
     defer shm2.close();
 
     try std.testing.expectEqual(@as(i32, 42), shm2.data.x);
@@ -1013,13 +1010,6 @@ test "SharedMemory - Single Struct" {
 }
 
 test "SharedMemory - Array Fixed Length" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloca = switch (tag) {
-        .linux, .freebsd => gpa.allocator(),
-        else => null,
-    };
-
     const array_size = 20;
     var expected = [_]i32{0} ** array_size;
     for (0..array_size) |i| {
@@ -1028,13 +1018,17 @@ test "SharedMemory - Array Fixed Length" {
 
     const shm_name = "/test_array_fixed_length";
 
-    if (tag != .windows) {
-        if (use_shm_funcs) posixForceClose(shm_name);
-    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    if (use_shm_funcs) posixForceClose(shm_name);
+
+    var b: DefaultBackend = .{};
+    const backend = b.backend();
 
     const SharedI32 = SharedMemory([array_size]i32);
 
-    var shm: SharedI32 = try SharedI32.create(shm_name, alloca);
+    var shm: SharedI32 = try SharedI32.create(shm_name, tmp.dir, backend);
     defer shm.close();
 
     for (shm.data, 0..) |*item, i| {
@@ -1042,24 +1036,16 @@ test "SharedMemory - Array Fixed Length" {
     }
 
     // Open the shared memory in another "process"
-    var shm2 = try SharedI32.open(shm_name, alloca);
+    var shm2 = try SharedI32.open(shm_name, tmp.dir, backend);
     defer shm2.close();
 
     for (shm2.data, 0..) |item, i| {
         try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
-        // std.debug.print("data @ idx:{d} -> {d}\n", .{ i, item });
     }
     try std.testing.expectEqualSlices(i32, &expected, shm2.data);
 }
 
 test "SharedMemory - Array Runtime Length" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloca = switch (tag) {
-        .linux, .freebsd => gpa.allocator(),
-        else => null,
-    };
-
     const array_size = 20;
     var expected = [_]i32{0} ** array_size;
     for (0..array_size) |i| {
@@ -1068,13 +1054,17 @@ test "SharedMemory - Array Runtime Length" {
 
     const shm_name = "/test_array_runtime_length";
 
-    if (tag != .windows) {
-        if (use_shm_funcs) posixForceClose(shm_name);
-    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    if (use_shm_funcs) posixForceClose(shm_name);
+
+    var b: DefaultBackend = .{};
+    const backend = b.backend();
 
     const SharedI32 = SharedMemory([]i32);
 
-    var shm: SharedI32 = try SharedI32.createWithLength(shm_name, array_size, alloca);
+    var shm: SharedI32 = try SharedI32.createCapacity(shm_name, array_size, tmp.dir, backend);
     defer shm.close();
 
     for (shm.data, 0..) |*item, i| {
@@ -1082,24 +1072,16 @@ test "SharedMemory - Array Runtime Length" {
     }
 
     // Open the shared memory in another "process"
-    var shm2 = try SharedI32.open(shm_name, alloca);
+    var shm2 = try SharedI32.open(shm_name, tmp.dir, backend);
     defer shm2.close();
 
     for (shm2.data, 0..) |item, i| {
         try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
-        // std.debug.print("data @ idx:{d} -> {d}\n", .{ i, item });
     }
     try std.testing.expectEqualSlices(i32, &expected, shm2.data);
 }
 
 test "SharedMemory - Structure with String" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloca = switch (tag) {
-        .linux, .freebsd => gpa.allocator(),
-        else => null,
-    };
-
     const TestStruct = struct {
         id: i32,
         float: f64,
@@ -1110,11 +1092,15 @@ test "SharedMemory - Structure with String" {
 
     const shm_name = "/test_struct_with_string";
 
-    if (tag != .windows) {
-        if (use_shm_funcs) posixForceClose(shm_name);
-    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
 
-    var shm = try SharedTestStruct.create(shm_name, alloca);
+    if (use_shm_funcs) posixForceClose(shm_name);
+
+    var b: DefaultBackend = .{};
+    const backend = b.backend();
+
+    var shm = try SharedTestStruct.create(shm_name, tmp.dir, backend);
     defer shm.close();
 
     shm.data.id = 42;
@@ -1122,7 +1108,7 @@ test "SharedMemory - Structure with String" {
     _ = std.fmt.bufPrint(&shm.data.string, "Hello, SHM!", .{}) catch unreachable;
 
     // Open the shared memory in another "process"
-    var shm2 = try SharedTestStruct.open(shm_name, alloca);
+    var shm2 = try SharedTestStruct.open(shm_name, tmp.dir, backend);
     defer shm2.close();
 
     try std.testing.expectEqual(@as(i32, 42), shm2.data.id);
