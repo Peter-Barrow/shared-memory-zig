@@ -169,8 +169,7 @@ pub fn memfdBasedCreate(meta_data_path: []const u8, name: []const u8, size: usiz
     };
 }
 
-
-pub memfdBasedExists(allocator: std.mem.Allocator, name: []const u8) bool {
+pub fn memfdBasedExists(allocator: std.mem.Allocator, name: []const u8) bool {
     // std.debug.print("name to test existence:\t{s}\n", .{name});
     const n = if (hasLeadingSlash(name)) name[1..] else name;
     const handle = std.fs.openFileAbsolute(n, .{}) catch return false;
@@ -1077,7 +1076,7 @@ pub const MemfdBackend = struct {
         const meta_path = try xgdRunTimePath(self.allocator, name);
         try XdgMemfdMeta.initFromAbsolutePath(meta_path) catch |err| switch (err) {
             .MetaDoesNotExist => return false,
-            => return true;
+            else => return true,
         };
     }
 };
@@ -1086,6 +1085,110 @@ pub const DefaultBackend = switch (tag) {
     .windows => WindowsBackend,
     .linux, .freebsd => if (use_shm_funcs) PosixBackend else MemfdBackend,
     else => PosixBackend,
+};
+
+pub const SharedMappingMeta = struct {
+    const Field = struct {
+        name: []const u8,
+        type: []const u8,
+        size: u32,
+        offset: u64,
+    };
+
+    version: u16 = 1,
+    size_bytes: u64,
+    timestamp: i64,
+    pid: u32,
+    fd: u32,
+    fields: []Field,
+
+    pub fn init(size_bytes: u64, pid: pid_t, fd: std.fs.File.Handle) @This() {
+        return .{
+            .size_bytes = size_bytes,
+            .timestamp = std.time.timestamp(),
+            .pid = @intCast(pid),
+            .fd = @intCast(fd),
+            .fields = .{
+                .{
+                    .name = "data",
+                    .type = "u8",
+                    .size = 1,
+                    .offset = 0,
+                },
+            },
+        };
+    }
+
+    pub fn initWithFields(
+        comptime T: type,
+        size_bytes: u64,
+        pid: pid_t,
+        fd: std.fs.File.Handle,
+    ) @This() {
+        const field_info = @typeInfo(T).@"struct";
+        const fields = blk: {
+            const num_elems = @divFloor(size_bytes, @sizeOf(T));
+            var offset: usize = 0;
+
+            const _fields = Field{} ** field_info.fields.len;
+            inline for (_fields, field_info.fields) |*_f, f| {
+                _f.name = f.name;
+                _f.type = @typeName(f.type);
+                _f.size = @sizeOf(f.type);
+                _f.offset = offset;
+                offset += _f.size * num_elems;
+            }
+
+            break :blk _fields;
+        };
+
+        var new = SharedMappingMeta.init(size_bytes, pid, fd);
+        new.fields = fields;
+        return new;
+    }
+
+    pub fn initFromFile(
+        meta_dir: std.fs.Dir,
+        name: []const u8,
+        allocator: std.mem.Allocator,
+    ) !@This() {
+        const contents = meta_dir.readFileAlloc(allocator, name, 4096);
+        defer allocator.free(contents);
+
+        const parsed = try std.json.parseFromSlice(
+            @This(),
+            allocator,
+            contents,
+            .{},
+        );
+        defer parsed.deinit();
+
+        const new: @This() = parsed.value;
+        return new;
+    }
+
+    pub fn write(
+        self: *@This(),
+        meta_dir: std.fs.Dir,
+        name: []const u8,
+        allocator: std.mem.Allocator,
+    ) !void {
+        var buf: std.io.Writer.Allocating = .init(allocator);
+        defer buf.deinit();
+        try buf.writer.print("{f}", .{std.json.fmt(
+            self,
+            .{
+                .whitespace = .indent_4,
+            },
+        )});
+
+        const name_ext: []const u8 = .{0} ** std.fs.max_name_bytes;
+        try std.fmt.bufPrint(&name, "{s}-meta.json", .{name});
+        const file = try meta_dir.createFile(name_ext, .{});
+        defer file.close();
+
+        try file.writeAll(buf.written());
+    }
 };
 
 pub const SharedRegion = struct {
