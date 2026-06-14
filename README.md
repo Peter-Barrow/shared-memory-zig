@@ -46,23 +46,42 @@ This codebase also uses the [known-folders](https://github.com/ziglibs/known-fol
 ## Example
 ### Create a shared struct
 ``` zig
-const shmem = @import("shared_memory");
+const shm = @import("shared_memory");
 
 const TestStruct = struct {
-    id: i32,
-    float: f64,
-    string: [20]u8,
+    x: i32,
+    y: f64,
 };
+const SharedStruct = SharedMemory(TestStruct);
 
-const shm_name = "/test_struct_with_string";
+const shm_name = "test_single_struct";
 
-var shm: SharedStruct = try SharedStruct.create(shm_name, alloca);
+var tmp = std.testing.tmpDir(.{});
+defer tmp.cleanup();
+
+const alloca = std.testing.allocator;
+const io = std.testing.io;
+
+var b: shm.DefaultBackend = .{};
+const backend = b.backend();
+
+var shm: SharedStruct = try shm.SharedStruct.create(
+    shm_name,
+    tmp.dir,
+    backend,
+    io,
+    alloca,
+);
 defer shm.close();
 
 shm.data.* = .{ .x = 42, .y = 3.14 };
 
 // Open the shared memory in another "process"
-var shm2 = try SharedStruct.open(shm_name, alloca);
+var shm2 = try SharedStruct.open(
+    shm_name,
+    tmp.dir,
+    backend,
+);
 defer shm2.close();
 
 try std.testing.expectEqual(@as(i32, 42), shm2.data.x);
@@ -71,14 +90,7 @@ try std.testing.expectApproxEqAbs(@as(f64, 3.14), shm2.data.y, 0.001);
 
 ### Create a shared array of comptime known length
 ``` zig
-const shmem = @import("shared_memory");
-
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-defer _ = gpa.deinit();
-const alloca = switch (tag) {
-    .linux, .freebsd => gpa.allocator(),
-    else => null,
-};
+const shm = @import("shared_memory");
 
 const array_size = 20;
 var expected = [_]i32{0} ** array_size;
@@ -86,11 +98,27 @@ for (0..array_size) |i| {
     expected[i] = @intCast(i * 2);
 }
 
-const shm_name = "/test_array";
+const alloca = std.testing.allocator;
+var io_threaded: std.Io.Threaded = .init(alloca, .{});
+const io = io_threaded.io();
 
-const SharedI32 = SharedMemory([array_size]i32);
+const shm_name = "test_array_fixed_length";
 
-var shm: SharedI32 = try SharedI32.create(shm_name, alloca);
+var tmp = std.testing.tmpDir(.{});
+defer tmp.cleanup();
+
+var b: shm.DefaultBackend = .{};
+const backend = b.backend();
+
+const SharedI32 = shm.SharedMemory([array_size]i32);
+
+var shm: SharedI32 = try SharedI32.create(
+    shm_name,
+    tmp.dir,
+    backend,
+    io,
+    alloca,
+);
 defer shm.close();
 
 for (shm.data, 0..) |*item, i| {
@@ -98,25 +126,18 @@ for (shm.data, 0..) |*item, i| {
 }
 
 // Open the shared memory in another "process"
-var shm2 = try SharedI32.open(shm_name, alloca);
+var shm2 = try SharedI32.open(shm_name, tmp.dir, backend);
 defer shm2.close();
 
 for (shm2.data, 0..) |item, i| {
     try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
 }
 try std.testing.expectEqualSlices(i32, &expected, shm2.data);
-}
 ```
+
 ### Create an array with runtime known length
 ``` zig
-const shmem = @import("shared_memory");
-
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-defer _ = gpa.deinit();
-const alloca = switch (tag) {
-    .linux, .freebsd => gpa.allocator(),
-    else => null,
-};
+const shm = @import("shared_memory");
 
 const array_size = 20;
 var expected = [_]i32{0} ** array_size;
@@ -124,11 +145,30 @@ for (0..array_size) |i| {
     expected[i] = @intCast(i * 2);
 }
 
-const shm_name = "/test_array";
+const alloca = std.testing.allocator;
+var io_threaded: std.Io.Threaded = .init(alloca, .{});
+const io = io_threaded.io();
 
-const SharedI32 = SharedMemory([]i32);
+const shm_name = "test_array_runtime_length";
 
-var shm: SharedI32 = try SharedI32.createWithLength(shm_name, array_size, alloca);
+var tmp = std.testing.tmpDir(.{});
+defer tmp.cleanup();
+
+if (use_shm_funcs) posixForceClose(shm_name);
+
+var b: shm.DefaultBackend = .{};
+const backend = b.backend();
+
+const SharedI32 = shm.SharedMemory([]i32);
+
+var shm: SharedI32 = try SharedI32.createCapacity(
+    shm_name,
+    tmp.dir,
+    array_size,
+    backend,
+    io,
+    alloca,
+);
 defer shm.close();
 
 for (shm.data, 0..) |*item, i| {
@@ -136,11 +176,12 @@ for (shm.data, 0..) |*item, i| {
 }
 
 // Open the shared memory in another "process"
-var shm2 = try SharedI32.open(shm_name, alloca);
+var shm2 = try SharedI32.open(shm_name, tmp.dir, backend);
 defer shm2.close();
 
-for (shm2.data, 0..) |item, i| {
-    try std.testing.expectEqual(@as(i32, @intCast(i * 2)), item);
+//for (shm2.data, 0..) |item, i| {
+for (0..array_size) |i| {
+    try std.testing.expectEqual(@as(i32, @intCast(i * 2)), shm2.data[i]);
 }
-try std.testing.expectEqualSlices(i32, &expected, shm2.data);
+try std.testing.expectEqualSlices(i32, &expected, shm2.data[0..array_size]);
 ```
