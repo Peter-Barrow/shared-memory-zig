@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const zigwin32 = b.dependency("zigwin32", .{}).module("win32");
+    const win32 = b.dependency("win32", .{}).module("win32");
     const known_folders = b.dependency("known_folders", .{}).module("known-folders");
 
     const mod = b.addModule("shared_memory", .{
@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(bool, "use_shm_funcs", use_shm_funcs);
     lib_unit_tests.root_module.addOptions("config", options);
-    lib_unit_tests.root_module.addImport("zigwin32", zigwin32);
+    lib_unit_tests.root_module.addImport("win32", win32);
     lib_unit_tests.root_module.addImport("known-folders", known_folders);
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
     });
 
     unit_test_check.root_module.addOptions("config", options);
-    unit_test_check.root_module.addImport("zigwin32", zigwin32);
+    unit_test_check.root_module.addImport("win32", win32);
     lib_unit_tests.root_module.addImport("known-folders", known_folders);
 
     const check = b.step("check", "Check if tests compiles");

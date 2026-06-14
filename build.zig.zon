@@ -6,9 +6,9 @@
             .url = "git+https://github.com/ziglibs/known-folders.git#ab5cf5feb936fa3b72c95d3ad0c0c67791937ba1",
             .hash = "known_folders-0.0.0-Fy-PJtTTAADUOhGKM0sxzG4eMkNQxRvx9e5dfHVyaeA3",
         },
-        .zigwin32 = .{
-            .url = "git+https://www.github.com/marlersoft/zigwin32.git#d21b419d808215e1f82605fdaddc49750bfa3bca",
-            .hash = "zigwin32-25.0.28-preview-AAAAAI0J-wP-8_KKo4Yjr33XLhVhlJmeagGUedByaOnX",
+        .win32 = .{
+            .url = "git+https://github.com/marlersoft/zigwin32.git#ec98bb4d9eea532320a8551720a9e3ec6de64994",
+            .hash = "win32-25.0.28-preview-mX5pFWMt5QPTVIGh3r2-OpPunpcCCjApyRbA6Zn6WALH",
         },
     },
     .paths = .{
