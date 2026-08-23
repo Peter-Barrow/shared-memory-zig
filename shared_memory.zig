@@ -106,6 +106,16 @@ pub const SHMBackend = struct {
     pub fn exists(self: SHMBackend, name: []const u8) bool {
         return self.vtable.exists(self.ptr, name);
     }
+
+    pub fn map(
+        self: SHMBackend,
+        fd: std.Io.File.Handle,
+        offset: usize,
+        size: usize,
+        desired_offset: ?usize,
+    ) anyerror![]u8 {
+        return self.vtable.map(self, fd, offset, size, desired_offset);
+    }
 };
 
 pub const PosixBackend = struct {
@@ -401,27 +411,6 @@ pub const WindowsBackend = struct {
             }
         }
 
-        // const ptr_maybe = winMem.MapViewOfFile(
-        //     handle,
-        //     .{
-        //         .READ = 1,
-        //         .WRITE = 1,
-        //     },
-        //     0,
-        //     0,
-        //     size,
-        // );
-
-        // var ptr: []align(4096) u8 = undefined;
-
-        // if (ptr_maybe) |p| {
-        //     ptr.ptr = @ptrCast(@alignCast(p));
-        //     // ptr.len = size;
-        // } else {
-        //     switch (std.os.windows.kernel32.GetLastError()) {
-        //         else => |err| return std.os.windows.unexpectedError(err),
-        //     }
-        // }
         const ptr = try map(context, handle, 0, @intCast(size), null);
 
         assert(exists(context, name) == true);
@@ -478,36 +467,7 @@ pub const WindowsBackend = struct {
         }
 
         const size: usize = @intCast(winFile.GetFileSizeEx(handle, null));
-
-        const ptr = try map(context, handle, 0, size, null); 
-
-        // const ptr_maybe = winMem.MapViewOfFile(
-        //     handle,
-        //     .{
-        //         .READ = 1,
-        //         .WRITE = 1,
-        //     },
-        //     0,
-        //     0,
-        //     0,
-        // );
-
-        // var size: usize = 0;
-        // var ptr: []u8 = undefined;
-
-        // if (ptr_maybe) |p| {
-        //     ptr.ptr = @ptrCast(@alignCast(p));
-        //     const header: ShmHeader = @as(
-        //         *ShmHeader,
-        //         @ptrCast(@alignCast(ptr.ptr[0..@sizeOf(ShmHeader)])),
-        //     ).*;
-        //     size = header.size_bytes;
-        //     ptr.len = @intCast(size);
-        // } else {
-        //     switch (std.os.windows.kernel32.GetLastError()) {
-        //         else => |err| return std.os.windows.unexpectedError(err),
-        //     }
-        // }
+        const ptr = try map(context, handle, 0, size, null);
 
         return .{
             .data = ptr[0..@as(usize, @intCast(size))],
@@ -596,10 +556,9 @@ pub const WindowsBackend = struct {
         _ = context;
 
         const proc = winThreading.GetCurrentProcess();
+        const addr = if (desired_address) |a| @as(*align(std.heap.page_size_min) anyopaque, @ptrFromInt(a)) else null;
 
         const prot: winMem.PAGE_PROTECTION_FLAGS = .{ .PAGE_READWRITE = 1 };
-
-        const addr = if (desired_address) |a| @as(*align(std.heap.page_size_min) anyopaque, @ptrFromInt(a)) else null;
 
         const maybe_ptr = winMem.MapViewOfFile3(
             fd,
