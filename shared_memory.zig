@@ -5,7 +5,8 @@ const tag = @import("builtin").target.os.tag;
 const windows = if (tag == .windows) std.os.windows;
 const winZig = if (tag == .windows) @import("win32").zig;
 const winFoundation = if (tag == .windows) @import("win32").foundation;
-
+const winThreading = if (tag == .windows) @import("win32").system.threading;
+const winFile = if (tag == .windows) @import("win32").storage.file_system;
 const winSysInfo = if (tag == .windows) @import("win32").system.system_information;
 const winMem = if (tag == .windows) @import("win32").system.memory;
 const winSec = if (tag == .windows) @import("win32").security;
@@ -58,11 +59,32 @@ pub const RawMapping = struct {
     is_owner: bool = false,
 };
 
+pub fn createRawMapping(name: []const u8, size: usize) !RawMapping {
+    var backend: DefaultBackend = .{};
+    return backend.backend().createRaw(name, size);
+}
+
+pub fn openRawMapping(name: []const u8) !RawMapping {
+    var backend: DefaultBackend = .{};
+    return backend.backend().openRaw(name);
+}
+
+pub fn closeRawMapping(mapping: RawMapping, name: []const u8) void {
+    var backend: DefaultBackend = .{};
+    return backend.backend().closeRaw(mapping, name);
+}
+
+pub fn RawMappingExists(name: []const u8) bool {
+    var backend: DefaultBackend = .{};
+    return backend.backend().exists(name);
+}
+
 pub const VTable = struct {
     createRaw: *const fn (ptr: *anyopaque, name: []const u8, size: usize) anyerror!RawMapping,
     openRaw: *const fn (ptr: *anyopaque, name: []const u8) anyerror!RawMapping,
     closeRaw: *const fn (ptr: *anyopaque, mapping: RawMapping, name: []const u8) void,
     exists: *const fn (ptr: *anyopaque, name: []const u8) bool,
+    map: *const fn (ptr: *anyopaque, fd: std.Io.File.Handle, offset: usize, size: usize, desired_offset: ?usize) anyerror![]u8,
 };
 
 pub const SHMBackend = struct {
@@ -93,6 +115,7 @@ pub const PosixBackend = struct {
         .openRaw = open,
         .closeRaw = close,
         .exists = exists,
+        .map = map,
     };
 
     pub fn backend(self: *Self) SHMBackend {
@@ -145,19 +168,8 @@ pub const PosixBackend = struct {
             .SUCCESS => {},
             else => return error.Unexpected,
         }
-        const flags_protection: std.posix.PROT = .{
-            .READ = true,
-            .WRITE = true,
-        };
 
-        const ptr: [*]u8 = @ptrCast(std.c.mmap(
-            null,
-            @intCast(size),
-            flags_protection,
-            .{ .TYPE = .SHARED },
-            fd,
-            0,
-        ));
+        const ptr = try map(context, fd, 0, size, null);
 
         return .{
             .data = ptr[0..size],
@@ -211,19 +223,27 @@ pub const PosixBackend = struct {
         }
 
         // const flags_protection: u32 = std.posix.PROT.READ | std.posix.PROT.WRITE;
-        const flags_protection: std.posix.PROT = .{
-            .READ = true,
-            .WRITE = true,
-        };
+        // const flags_protection: std.posix.PROT = .{
+        //     .READ = true,
+        //     .WRITE = true,
+        // };
 
-        const ptr: [*]u8 = @ptrCast(std.c.mmap(
-            null,
-            @intCast(stat.size),
-            flags_protection,
-            .{ .TYPE = .SHARED },
+        // const ptr: [*]u8 = @ptrCast(std.c.mmap(
+        //     null,
+        //     @intCast(stat.size),
+        //     flags_protection,
+        //     .{ .TYPE = .SHARED },
+        //     fd,
+        //     0,
+        // ));
+
+        const ptr = try map(
+            context,
             fd,
             0,
-        ));
+            @intCast(stat.size),
+            null,
+        );
 
         return .{
             .data = ptr[0..@as(usize, @intCast(stat.size))],
@@ -290,6 +310,33 @@ pub const PosixBackend = struct {
 
         return false;
     }
+
+    fn map(
+        context: *anyopaque,
+        fd: std.Io.File.Handle,
+        offset: usize,
+        size: usize,
+        desired_address: ?usize,
+    ) ![]u8 {
+        _ = context;
+        const addr = if (desired_address) |a| @as(*align(std.heap.page_size_min) anyopaque, @ptrFromInt(a)) else null;
+
+        const prot: std.posix.PROT = .{
+            .READ = true,
+            .WRITE = true,
+        };
+
+        const ptr: [*]u8 = @ptrCast(std.c.mmap(
+            addr,
+            @intCast(size),
+            prot,
+            .{ .TYPE = .SHARED },
+            fd,
+            @intCast(offset),
+        ));
+
+        return ptr[0..size];
+    }
 };
 
 pub const WindowsBackend = struct {
@@ -299,6 +346,7 @@ pub const WindowsBackend = struct {
         .openRaw = open,
         .closeRaw = close,
         .exists = exists,
+        .map = map,
     };
 
     pub fn backend(self: *Self) SHMBackend {
@@ -353,27 +401,28 @@ pub const WindowsBackend = struct {
             }
         }
 
-        const ptr_maybe = winMem.MapViewOfFile(
-            handle,
-            .{
-                .READ = 1,
-                .WRITE = 1,
-            },
-            0,
-            0,
-            size,
-        );
+        // const ptr_maybe = winMem.MapViewOfFile(
+        //     handle,
+        //     .{
+        //         .READ = 1,
+        //         .WRITE = 1,
+        //     },
+        //     0,
+        //     0,
+        //     size,
+        // );
 
-        var ptr: []align(4096) u8 = undefined;
+        // var ptr: []align(4096) u8 = undefined;
 
-        if (ptr_maybe) |p| {
-            ptr.ptr = @ptrCast(@alignCast(p));
-            // ptr.len = size;
-        } else {
-            switch (std.os.windows.kernel32.GetLastError()) {
-                else => |err| return std.os.windows.unexpectedError(err),
-            }
-        }
+        // if (ptr_maybe) |p| {
+        //     ptr.ptr = @ptrCast(@alignCast(p));
+        //     // ptr.len = size;
+        // } else {
+        //     switch (std.os.windows.kernel32.GetLastError()) {
+        //         else => |err| return std.os.windows.unexpectedError(err),
+        //     }
+        // }
+        const ptr = try map(context, handle, 0, @intCast(size), null);
 
         assert(exists(context, name) == true);
 
@@ -428,33 +477,37 @@ pub const WindowsBackend = struct {
             }
         }
 
-        const ptr_maybe = winMem.MapViewOfFile(
-            handle,
-            .{
-                .READ = 1,
-                .WRITE = 1,
-            },
-            0,
-            0,
-            0,
-        );
+        const size: usize = @intCast(winFile.GetFileSizeEx(handle, null));
 
-        var size: usize = 0;
-        var ptr: []u8 = undefined;
+        const ptr = try map(context, handle, 0, size, null); 
 
-        if (ptr_maybe) |p| {
-            ptr.ptr = @ptrCast(@alignCast(p));
-            const header: ShmHeader = @as(
-                *ShmHeader,
-                @ptrCast(@alignCast(ptr.ptr[0..@sizeOf(ShmHeader)])),
-            ).*;
-            size = header.size_bytes;
-            ptr.len = @intCast(size);
-        } else {
-            switch (std.os.windows.kernel32.GetLastError()) {
-                else => |err| return std.os.windows.unexpectedError(err),
-            }
-        }
+        // const ptr_maybe = winMem.MapViewOfFile(
+        //     handle,
+        //     .{
+        //         .READ = 1,
+        //         .WRITE = 1,
+        //     },
+        //     0,
+        //     0,
+        //     0,
+        // );
+
+        // var size: usize = 0;
+        // var ptr: []u8 = undefined;
+
+        // if (ptr_maybe) |p| {
+        //     ptr.ptr = @ptrCast(@alignCast(p));
+        //     const header: ShmHeader = @as(
+        //         *ShmHeader,
+        //         @ptrCast(@alignCast(ptr.ptr[0..@sizeOf(ShmHeader)])),
+        //     ).*;
+        //     size = header.size_bytes;
+        //     ptr.len = @intCast(size);
+        // } else {
+        //     switch (std.os.windows.kernel32.GetLastError()) {
+        //         else => |err| return std.os.windows.unexpectedError(err),
+        //     }
+        // }
 
         return .{
             .data = ptr[0..@as(usize, @intCast(size))],
@@ -532,6 +585,42 @@ pub const WindowsBackend = struct {
 
         return false;
     }
+
+    fn map(
+        context: *anyopaque,
+        fd: std.Io.File.Handle,
+        offset: usize,
+        size: usize,
+        desired_address: ?usize,
+    ) ![]u8 {
+        _ = context;
+
+        const proc = winThreading.GetCurrentProcess();
+
+        const prot: winMem.PAGE_PROTECTION_FLAGS = .{ .PAGE_READWRITE = 1 };
+
+        const addr = if (desired_address) |a| @as(*align(std.heap.page_size_min) anyopaque, @ptrFromInt(a)) else null;
+
+        const maybe_ptr = winMem.MapViewOfFile3(
+            fd,
+            proc,
+            addr,
+            @intCast(offset),
+            @intCast(size),
+            .{ .REPLACE_PLACEHOLDER = 1 },
+            @intCast(prot),
+            null,
+            0,
+        );
+
+        if (maybe_ptr) |ptr| {
+            return ptr[0..size];
+        }
+
+        return switch (std.os.windows.kernel32.GetLastError()) {
+            else => |err| return std.os.windows.unexpectedError(err),
+        };
+    }
 };
 
 pub const MemfdBackend = struct {
@@ -577,20 +666,20 @@ pub const MemfdBackend = struct {
     ///     - ftruncate failure
     ///     - mmap failure
     fn create(context: *anyopaque, name: []const u8, size: usize) !RawMapping {
-        _ = context;
-
         const fd = try std.posix.memfd_create(name, 0);
 
         try std.posix.ftruncate(fd, size);
 
-        const ptr = try std.posix.mmap(
-            null,
-            size,
-            @intCast(std.posix.PROT.READ | std.posix.PROT.WRITE),
-            .{ .TYPE = .SHARED },
-            fd,
-            0,
-        );
+        // const ptr = try std.posix.mmap(
+        //     null,
+        //     size,
+        //     @intCast(std.posix.PROT.READ | std.posix.PROT.WRITE),
+        //     .{ .TYPE = .SHARED },
+        //     fd,
+        //     0,
+        // );
+
+        const ptr = try map(context, fd, 0, size, null);
 
         const pid: pid_t = switch (tag) {
             .linux => std.os.linux.getpid(),
@@ -646,15 +735,23 @@ pub const MemfdBackend = struct {
         const fd = handle.handle;
 
         const stat = try std.posix.fstat(fd);
-        const flags_protection: u32 = std.posix.PROT.READ;
+        // const flags_protection: u32 = std.posix.PROT.READ;
 
-        const ptr = try std.posix.mmap(
-            null,
-            @intCast(stat.size),
-            flags_protection,
-            .{ .TYPE = .SHARED },
+        // const ptr = try std.posix.mmap(
+        //     null,
+        //     @intCast(stat.size),
+        //     flags_protection,
+        //     .{ .TYPE = .SHARED },
+        //     fd,
+        //     0,
+        // );
+
+        const ptr = try map(
+            context,
             fd,
             0,
+            @intCast(stat.size),
+            null,
         );
 
         return .{
@@ -722,6 +819,34 @@ pub const MemfdBackend = struct {
         ) catch return false;
 
         return true;
+    }
+
+    fn map(
+        context: *anyopaque,
+        fd: std.Io.File.Handle,
+        offset: usize,
+        size: usize,
+        desired_address: ?usize,
+    ) ![]u8 {
+        _ = context;
+
+        const addr = if (desired_address) |a| @as(*align(std.heap.page_size_min) anyopaque, @ptrFromInt(a)) else null;
+
+        const prot: std.posix.PROT = .{
+            .READ = true,
+            .WRITE = true,
+        };
+
+        const ptr: [*]u8 = @ptrCast(std.c.mmap(
+            addr,
+            @intCast(size),
+            prot,
+            .{ .TYPE = .SHARED },
+            fd,
+            @intCast(offset),
+        ));
+
+        return ptr[0..size];
     }
 };
 
@@ -930,25 +1055,25 @@ pub const SharedMappingMeta = struct {
     }
 };
 
-pub const SharedRegion = struct {
+pub const SharedBytes = struct {
     name: [std.fs.max_name_bytes]u8 = [_]u8{0} ** std.fs.max_name_bytes,
     name_len: usize = 0,
     mapping: RawMapping,
     meta_dir: std.Io.Dir,
-    backend: SHMBackend,
 
     pub fn create(
         name: []const u8,
         size: usize,
         meta_dir: std.Io.Dir,
-        backend: SHMBackend,
-    ) !SharedRegion {
+    ) !SharedBytes {
+        var default_backend: DefaultBackend = .{};
+        const backend = default_backend.backend();
+
         const mapping = try backend.createRaw(name, size);
-        var result: SharedRegion = .{
+        var result: SharedBytes = .{
             .name_len = name.len,
             .mapping = mapping,
             .meta_dir = meta_dir,
-            .backend = backend,
         };
 
         @memcpy(@constCast(result.name[0..name.len]), name);
@@ -956,17 +1081,19 @@ pub const SharedRegion = struct {
         return result;
     }
 
-    pub fn nameSlice(self: *const SharedRegion) []const u8 {
+    pub fn nameSlice(self: *const SharedBytes) []const u8 {
         return self.name[0..self.name_len];
     }
 
-    pub fn open(name: []const u8, meta_dir: std.Io.Dir, backend: SHMBackend) !SharedRegion {
+    pub fn open(name: []const u8, meta_dir: std.Io.Dir) !SharedBytes {
+        var default_backend: DefaultBackend = .{};
+        const backend = default_backend.backend();
+
         const mapping = try backend.openRaw(name);
-        var result: SharedRegion = .{
+        var result: SharedBytes = .{
             .name_len = name.len,
             .mapping = mapping,
             .meta_dir = meta_dir,
-            .backend = backend,
         };
 
         @memcpy(result.name[0..name.len], name);
@@ -974,20 +1101,24 @@ pub const SharedRegion = struct {
         return result;
     }
 
-    pub fn close(self: *SharedRegion) void {
-        self.backend.closeRaw(self.mapping, self.nameSlice());
+    pub fn close(self: *SharedBytes) void {
+        var default_backend: DefaultBackend = .{};
+        const backend = default_backend.backend();
+        backend.closeRaw(self.mapping, self.nameSlice());
     }
 
-    pub fn exists(self: *SharedRegion) bool {
-        return self.backend.exists(self.nameSlice());
+    pub fn exists(self: *SharedBytes) bool {
+        var default_backend: DefaultBackend = .{};
+        const backend = default_backend.backend();
+        return backend.exists(self.nameSlice());
     }
 
-    pub fn bytes(self: *const SharedRegion) []u8 {
+    pub fn bytes(self: *const SharedBytes) []u8 {
         return self.mapping.data;
     }
 };
 
-pub fn SharedMemory(comptime S: type) type {
+pub fn Shared(comptime S: type) type {
     return struct {
         const Self = @This();
         const T = switch (@typeInfo(S)) {
@@ -999,21 +1130,19 @@ pub fn SharedMemory(comptime S: type) type {
             else => *S,
         };
 
-        region: SharedRegion,
+        region: SharedBytes,
         data: T,
 
         pub fn create(
             name: []const u8,
             meta_dir: std.Io.Dir,
-            backend: SHMBackend,
             io: std.Io,
             allocator: std.mem.Allocator,
         ) !Self {
-            const shared_region = try SharedRegion.create(
+            const shared_region = try SharedBytes.create(
                 name,
                 @sizeOf(S),
                 meta_dir,
-                backend,
             );
 
             var meta_data = try SharedMappingMeta.initWithFields(
@@ -1039,16 +1168,14 @@ pub fn SharedMemory(comptime S: type) type {
             name: []const u8,
             meta_dir: std.Io.Dir,
             count: usize,
-            backend: SHMBackend,
             io: std.Io,
             allocator: std.mem.Allocator,
         ) !Self {
             const size = @sizeOf(S) * count;
-            const shared_region = try SharedRegion.create(
+            const shared_region = try SharedBytes.create(
                 name,
                 size,
                 meta_dir,
-                backend,
             );
 
             var meta_data = try SharedMappingMeta.initWithFields(
@@ -1075,11 +1202,10 @@ pub fn SharedMemory(comptime S: type) type {
             };
         }
 
-        pub fn open(name: []const u8, meta_dir: std.Io.Dir, backend: SHMBackend) !Self {
-            const shared_region = try SharedRegion.open(
+        pub fn open(name: []const u8, meta_dir: std.Io.Dir) !Self {
+            const shared_region = try SharedBytes.open(
                 name,
                 meta_dir,
-                backend,
             );
 
             const data: T = @ptrCast(@alignCast(shared_region.bytes()));
@@ -1102,7 +1228,7 @@ test "SharedMemory - Single Struct" {
         x: i32,
         y: f64,
     };
-    const SharedStruct = SharedMemory(TestStruct);
+    const SharedStruct = Shared(TestStruct);
 
     const shm_name = "test_single_struct";
     if (use_shm_funcs) posixForceClose(shm_name);
@@ -1113,13 +1239,9 @@ test "SharedMemory - Single Struct" {
     const alloca = std.testing.allocator;
     const io = std.testing.io;
 
-    var b: DefaultBackend = .{};
-    const backend = b.backend();
-
     var shm: SharedStruct = try SharedStruct.create(
         shm_name,
         tmp.dir,
-        backend,
         io,
         alloca,
     );
@@ -1131,7 +1253,6 @@ test "SharedMemory - Single Struct" {
     var shm2 = try SharedStruct.open(
         shm_name,
         tmp.dir,
-        backend,
     );
     defer shm2.close();
 
@@ -1157,15 +1278,11 @@ test "SharedMemory - Array Fixed Length" {
 
     if (use_shm_funcs) posixForceClose(shm_name);
 
-    var b: DefaultBackend = .{};
-    const backend = b.backend();
-
-    const SharedI32 = SharedMemory([array_size]i32);
+    const SharedI32 = Shared([array_size]i32);
 
     var shm: SharedI32 = try SharedI32.create(
         shm_name,
         tmp.dir,
-        backend,
         io,
         alloca,
     );
@@ -1176,7 +1293,7 @@ test "SharedMemory - Array Fixed Length" {
     }
 
     // Open the shared memory in another "process"
-    var shm2 = try SharedI32.open(shm_name, tmp.dir, backend);
+    var shm2 = try SharedI32.open(shm_name, tmp.dir);
     defer shm2.close();
 
     for (shm2.data, 0..) |item, i| {
@@ -1203,16 +1320,12 @@ test "SharedMemory - Array Runtime Length" {
 
     if (use_shm_funcs) posixForceClose(shm_name);
 
-    var b: DefaultBackend = .{};
-    const backend = b.backend();
-
-    const SharedI32 = SharedMemory([]i32);
+    const SharedI32 = Shared([]i32);
 
     var shm: SharedI32 = try SharedI32.createCapacity(
         shm_name,
         tmp.dir,
         array_size,
-        backend,
         io,
         alloca,
     );
@@ -1223,7 +1336,7 @@ test "SharedMemory - Array Runtime Length" {
     }
 
     // Open the shared memory in another "process"
-    var shm2 = try SharedI32.open(shm_name, tmp.dir, backend);
+    var shm2 = try SharedI32.open(shm_name, tmp.dir);
     defer shm2.close();
 
     //for (shm2.data, 0..) |item, i| {
@@ -1242,7 +1355,7 @@ test "SharedMemory - Structure with String" {
         string: [20]u8,
     };
 
-    const SharedTestStruct = SharedMemory(TestStruct);
+    const SharedTestStruct = Shared(TestStruct);
 
     const shm_name = "test_struct_with_string";
 
@@ -1255,13 +1368,9 @@ test "SharedMemory - Structure with String" {
     var io_threaded: std.Io.Threaded = .init(alloca, .{});
     const io = io_threaded.io();
 
-    var b: DefaultBackend = .{};
-    const backend = b.backend();
-
     var shm = try SharedTestStruct.create(
         shm_name,
         tmp.dir,
-        backend,
         io,
         alloca,
     );
@@ -1272,7 +1381,7 @@ test "SharedMemory - Structure with String" {
     _ = std.fmt.bufPrint(&shm.data.string, "Hello, SHM!", .{}) catch unreachable;
 
     // Open the shared memory in another "process"
-    var shm2 = try SharedTestStruct.open(shm_name, tmp.dir, backend);
+    var shm2 = try SharedTestStruct.open(shm_name, tmp.dir);
     defer shm2.close();
 
     try std.testing.expectEqual(@as(i32, 42), shm2.data.id);
